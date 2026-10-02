@@ -6,8 +6,8 @@
 - Um pedido por vez. Uma thread lê o stdin (para o `cancel` chegar durante um pedido); EOF no stdin = o pai
   morreu ou fechou o pipe -> `os._exit(0)` na hora (o ctranslate2 não é interrompível no meio de uma janela).
 - Carga preguiçosa: o `hello` sai antes de importar qualquer biblioteca pesada; o modelo carrega no 1º pedido.
-- `--fake` (ou TRANSCRICOES_FAKE_WORKER): modo determinístico, só biblioteca padrão (regra em
-  TRANSCRICOES_FAKE_DELAY_MS: pausa em ms entre segmentos; `slow` em TRANSCRICOES_FAKE_WORKER = 300).
+- `--fake` (ou RSTT_FAKE_WORKER): modo determinístico, só biblioteca padrão (regra em
+  RSTT_FAKE_DELAY_MS: pausa em ms entre segmentos; `slow` em RSTT_FAKE_WORKER = 300).
 """
 import json
 import math
@@ -185,8 +185,8 @@ def fake_duration(path):
 
 
 def fake_delay_s():
-    raw = os.environ.get("TRANSCRICOES_FAKE_DELAY_MS")
-    if raw is None and os.environ.get("TRANSCRICOES_FAKE_WORKER") == "slow":
+    raw = os.environ.get("RSTT_FAKE_DELAY_MS")
+    if raw is None and os.environ.get("RSTT_FAKE_WORKER") == "slow":
         raw = "300"
     try:
         return max(0.0, float(raw or 0) / 1000.0)
@@ -466,7 +466,7 @@ def reader(jobs):
 
 
 def main(argv):
-    fake = "--fake" in argv or bool(os.environ.get("TRANSCRICOES_FAKE_WORKER"))
+    fake = "--fake" in argv or bool(os.environ.get("RSTT_FAKE_WORKER"))
     os.environ.setdefault("HF_HUB_OFFLINE", "1")  # sem rede: modelos sempre locais
     attach_protocol_stream()
     send(hello(fake))

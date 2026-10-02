@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 pub const BAR_LABEL: &str = "bar";
-/// Título da janela (contrato com o trecho do Hyprland na UI: `title:^(transcricoes-bar)$`).
-pub const BAR_TITLE: &str = "transcricoes-bar";
+/// Título da janela (contrato com o trecho do Hyprland na UI: `title:^(rstt-bar)$`).
+pub const BAR_TITLE: &str = "rstt-bar";
 pub const BAR_URL: &str = "index.html#/bar";
 /// Tamanho lógico.
 pub const BAR_SIZE: (f64, f64) = (320.0, 56.0);

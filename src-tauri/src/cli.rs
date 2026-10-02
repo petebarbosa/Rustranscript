@@ -20,9 +20,9 @@ use crate::ipc::{self, Request};
 use crate::transcription;
 
 #[derive(Parser)]
-#[command(name = "transcricoes", version, about = "Gravação e transcrição de reuniões, local")]
+#[command(name = "rstt", version, about = "Gravação e transcrição de reuniões, local")]
 pub struct Cli {
-    /// Diretório de dados (padrão: ~/.local/share/transcricoes ou $TRANSCRICOES_DATA_DIR)
+    /// Diretório de dados (padrão: ~/.local/share/rustranscript ou $RSTT_DATA_DIR)
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
     /// Idioma das mensagens: pt-BR, en-US, es-419
@@ -422,6 +422,10 @@ pub fn run(args: Vec<std::ffi::OsString>) -> i32 {
     if matches!(cli.cmd, Cmd::Gui) {
         crate::gui::run(cli.data_dir);
         return 0;
+    }
+    if let Err(blocked) = paths::migrate_legacy(cli.data_dir.as_deref()) {
+        eprintln!("rstt: {}", crate::i18n::legacy_running_message(cli.lang.as_deref().and_then(Lang::parse).unwrap_or_else(Lang::system), &blocked));
+        return 1;
     }
     let data_dir = paths::resolve_data_dir(cli.data_dir.as_deref());
     let mut lang = cli.lang.as_deref().and_then(Lang::parse);
@@ -1172,7 +1176,7 @@ mod tests {
 
     #[test]
     fn record_commands_parse() {
-        let p = |args: &[&str]| Cli::try_parse_from(std::iter::once("transcricoes").chain(args.iter().copied())).map(|c| c.cmd);
+        let p = |args: &[&str]| Cli::try_parse_from(std::iter::once("rstt").chain(args.iter().copied())).map(|c| c.cmd);
         let Ok(Cmd::Record { what: RecordCmd::Start(a) }) =
             p(&["record", "start", "--library", "Empresa", "--client", "Cliente", "--title", "T", "--speakers", "2", "--mic", "off"])
         else {
@@ -1187,9 +1191,9 @@ mod tests {
         assert!(p(&["record", "start", "--client", "C"]).is_err(), "--client exige --library");
     }
 
-    /// Roda um comando como `transcricoes <args>` e devolve o JSON e o aviso para a app aberta.
+    /// Roda um comando como `rstt <args>` e devolve o JSON e o aviso para a app aberta.
     fn run(app: &App, args: &[&str]) -> core_lib::Result<(Value, Option<Value>)> {
-        let argv = std::iter::once("transcricoes").chain(args.iter().copied());
+        let argv = std::iter::once("rstt").chain(args.iter().copied());
         let cli = Cli::try_parse_from(argv).unwrap();
         match exec(app, cli.cmd, Lang::EnUs, false)? {
             Output::Json(v, c) => Ok((v, c)),
@@ -1268,7 +1272,7 @@ mod tests {
     }
 
     fn cmd(args: &[&str]) -> Cmd {
-        Cli::try_parse_from(std::iter::once("transcricoes").chain(args.iter().copied())).unwrap().cmd
+        Cli::try_parse_from(std::iter::once("rstt").chain(args.iter().copied())).unwrap().cmd
     }
 
     fn rec_cmd(args: &[&str]) -> RecordCmd {
@@ -1338,7 +1342,7 @@ mod tests {
 
     #[test]
     fn transcription_commands_parse() {
-        let p = |args: &[&str]| Cli::try_parse_from(std::iter::once("transcricoes").chain(args.iter().copied())).map(|c| c.cmd);
+        let p = |args: &[&str]| Cli::try_parse_from(std::iter::once("rstt").chain(args.iter().copied())).map(|c| c.cmd);
         let Ok(Cmd::Transcribe(a)) = p(&["transcribe", "call_2026-10-01_08-21-52", "--kind", "rediarize", "--language", "pt-BR", "--speakers", "2", "--no-bleed-filter"]) else {
             panic!("transcribe")
         };

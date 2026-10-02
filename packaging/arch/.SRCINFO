@@ -1,0 +1,27 @@
+pkgbase = rustranscript
+	pkgdesc = Record and transcribe your meetings locally, with speaker separation
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/petebarbosa/Rustranscript
+	arch = x86_64
+	license = MIT
+	makedepends = cargo
+	makedepends = nodejs
+	makedepends = npm
+	makedepends = git
+	depends = webkit2gtk-4.1
+	depends = gtk3
+	depends = libpulse
+	depends = libayatana-appindicator
+	depends = glib2
+	depends = dbus
+	depends = glibc
+	depends = gcc-libs
+	depends = hicolor-icon-theme
+	optdepends = xdg-utils: open links and folders from the app
+	options = !lto
+	options = !debug
+	source = rustranscript-0.1.0.tar.gz::https://github.com/petebarbosa/Rustranscript/archive/refs/tags/v0.1.0.tar.gz
+	sha256sums = SKIP
+
+pkgname = rustranscript

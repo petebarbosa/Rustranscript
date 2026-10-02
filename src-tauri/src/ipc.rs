@@ -1,4 +1,4 @@
-//! Socket local do usuário (`$XDG_RUNTIME_DIR/transcricoes/ipc.sock`, modo 0600, nunca TCP).
+//! Socket local do usuário (`$XDG_RUNTIME_DIR/rustranscript/ipc.sock`, modo 0600, nunca TCP).
 //!
 //! Protocolo **requisição/resposta em JSON-linhas**, uma requisição por conexão: o cliente conecta,
 //! escreve uma linha, lê uma linha, fecha. O servidor atende cada conexão numa thread própria
@@ -28,7 +28,7 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 pub const START_WAIT: Duration = Duration::from_secs(10);
 /// Variável de ambiente que `spawn_gui` define: a GUI sobe **sem abrir a janela principal** (só tray e,
 /// se for o caso, a barra). Decisão de B (contrato 10.4): quem grava por atalho/CLI não quer a janela.
-pub const HIDDEN_ENV: &str = "TRANSCRICOES_HIDDEN";
+pub const HIDDEN_ENV: &str = "RSTT_HIDDEN";
 
 // ------------------------------------------------------------------ mensagens
 
@@ -161,7 +161,7 @@ pub fn request_on(sock: &Path, req: &Request, timeout: Duration) -> Result<Respo
 
 /// Sobe a GUI destacada, sem janela principal (`HIDDEN_ENV`) (`$APPIMAGE` se existir — dentro de um AppImage `current_exe` aponta para o
 /// squashfs, que some quando o processo sai —, senão `current_exe`), sem argumentos, com
-/// `TRANSCRICOES_DATA_DIR` apontando para `data_dir`, stdio nulo e em grupo de processos próprio.
+/// `RSTT_DATA_DIR` apontando para `data_dir`, stdio nulo e em grupo de processos próprio.
 /// Subir duas vezes é inofensivo: o plugin de instância única absorve a segunda.
 pub fn spawn_gui(data_dir: &Path) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;

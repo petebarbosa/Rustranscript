@@ -1,5 +1,5 @@
 //! Verificação **manual** do `PulseBackend` com um servidor PulseAudio/PipeWire real:
-//! `cargo test -p transcricoes-recorder --test pulse_live -- --ignored --nocapture`
+//! `cargo test -p rstt-recorder --test pulse_live -- --ignored --nocapture`
 //!
 //! Privacidade: o monitor do sink padrão captura tudo que está tocando no sistema, por isso o teste
 //! só calcula números (RMS e potência em 1 kHz) em memória — **nada é gravado em disco**. O único
@@ -124,14 +124,14 @@ fn live_default_mic_opens_with_the_requested_format() {
     assert!((0.7..1.6).contains(&took), "relógio do servidor: {took}");
 }
 
-/// Sink nulo temporário (`transcricoes_test`): a sessão grava o monitor DELE, nunca o do sistema, então
+/// Sink nulo temporário (`rstt_test`): a sessão grava o monitor DELE, nunca o do sistema, então
 /// nenhum áudio real (reunião, música) pode ir parar no WAV. Descarregado no `Drop`, mesmo se o teste falhar.
 struct NullSink {
     module: String,
 }
 
 impl NullSink {
-    const NAME: &'static str = "transcricoes_test";
+    const NAME: &'static str = "rstt_test";
 
     fn load() -> NullSink {
         let out = Command::new("pactl")

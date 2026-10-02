@@ -20,4 +20,4 @@ pub mod staging;
 /// Variável de ambiente de teste: `1` = shell usa o `ProcessEngine` com `worker.py --fake` (Python do
 /// sistema, sem runtime nem modelos; instantâneo); `slow` = idem com 300 ms entre segmentos (testes de
 /// cancelar/matar). Valor que é um caminho existente = esse interpretador em vez de `python3`.
-pub const FAKE_WORKER_ENV: &str = "TRANSCRICOES_FAKE_WORKER";
+pub const FAKE_WORKER_ENV: &str = "RSTT_FAKE_WORKER";

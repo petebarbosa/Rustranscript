@@ -1,0 +1,49 @@
+# Maintainer: petebarbosa <https://github.com/petebarbosa>
+pkgname=rustranscript
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Record and transcribe your meetings locally, with speaker separation'
+arch=('x86_64')
+url='https://github.com/petebarbosa/Rustranscript'
+license=('MIT')
+depends=('webkit2gtk-4.1' 'gtk3' 'libpulse' 'libayatana-appindicator' 'glib2' 'dbus' 'glibc' 'gcc-libs' 'hicolor-icon-theme')
+makedepends=('cargo' 'nodejs' 'npm' 'git')
+optdepends=('xdg-utils: open links and folders from the app')
+options=('!lto' '!debug')
+# Tag v$pkgver must exist on GitHub. Replace SKIP with the real checksum once it is published.
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "Rustranscript-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+  npm ci --no-audit --no-fund
+}
+
+build() {
+  cd "Rustranscript-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # Frontend is built by tauri's beforeBuildCommand; no AppImage here, just the binary.
+  npx tauri build --no-bundle -- --locked
+}
+
+package() {
+  cd "Rustranscript-$pkgver"
+  install -Dm755 target/release/rstt "$pkgdir/usr/bin/rstt"
+  install -Dm644 packaging/linux/rustranscript.desktop \
+    "$pkgdir/usr/share/applications/rustranscript.desktop"
+
+  local size
+  for size in 32 128; do
+    install -Dm644 "src-tauri/icons/${size}x${size}.png" \
+      "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/rustranscript.png"
+  done
+  install -Dm644 src-tauri/icons/128x128@2x.png \
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/rustranscript.png"
+  install -Dm644 src-tauri/icons/icon.png \
+    "$pkgdir/usr/share/icons/hicolor/512x512/apps/rustranscript.png"
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

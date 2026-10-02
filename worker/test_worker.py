@@ -2,9 +2,9 @@
 Falam com o processo de verdade, como o pai Rust: JSON-lines em stdin/stdout.
 
 - Modo `--fake` (só stdlib): sempre roda.
-- Teste REAL (opt-in): defina TRANSCRICOES_WORKER_E2E=1, TRANSCRICOES_E2E_PYTHON (python do venv com
-  faster-whisper/sherpa-onnx), TRANSCRICOES_E2E_AUDIO (clipe curto, <= 90 s, com fala) e
-  TRANSCRICOES_E2E_MODELS (pasta com `whisper-large-v3-turbo/` e `diar/` -> segmentação + embedding).
+- Teste REAL (opt-in): defina RSTT_WORKER_E2E=1, RSTT_E2E_PYTHON (python do venv com
+  faster-whisper/sherpa-onnx), RSTT_E2E_AUDIO (clipe curto, <= 90 s, com fala) e
+  RSTT_E2E_MODELS (pasta com `whisper-large-v3-turbo/` e `diar/` -> segmentação + embedding).
 """
 import json
 import math
@@ -133,7 +133,7 @@ class FakeHandshake(FakeBase):
         self.assertEqual(self.w.p.wait(timeout=10), 0)
 
     def test_env_var_also_enables_fake(self):
-        w = Worker(env={"TRANSCRICOES_FAKE_WORKER": "1"})
+        w = Worker(env={"RSTT_FAKE_WORKER": "1"})
         self.addCleanup(w.close)
         self.assertTrue(w.recv()["fake"])
 
@@ -213,7 +213,7 @@ class FakeDiarizeEnergy(FakeBase):
 
 class FakeCancel(FakeBase):
     def start(self, **env):
-        super().start(TRANSCRICOES_FAKE_DELAY_MS="150", **env)
+        super().start(RSTT_FAKE_DELAY_MS="150", **env)
 
     def test_cancel_mid_transcribe(self):
         self.w.send(self.transcribe())
@@ -347,18 +347,18 @@ class NoOrphans(unittest.TestCase):
 
 # ---------------------------------------------------------------- real (opt-in)
 
-E2E = os.environ.get("TRANSCRICOES_WORKER_E2E")
+E2E = os.environ.get("RSTT_WORKER_E2E")
 
 
-@unittest.skipUnless(E2E, "defina TRANSCRICOES_WORKER_E2E=1 (+ _E2E_PYTHON/_E2E_AUDIO/_E2E_MODELS)")
+@unittest.skipUnless(E2E, "defina RSTT_WORKER_E2E=1 (+ _E2E_PYTHON/_E2E_AUDIO/_E2E_MODELS)")
 class RealE2E(unittest.TestCase):
     alive = staticmethod(alive)
 
     @classmethod
     def setUpClass(cls):
-        cls.python = os.environ["TRANSCRICOES_E2E_PYTHON"]
-        cls.audio = os.environ["TRANSCRICOES_E2E_AUDIO"]
-        models = os.environ["TRANSCRICOES_E2E_MODELS"]
+        cls.python = os.environ["RSTT_E2E_PYTHON"]
+        cls.audio = os.environ["RSTT_E2E_AUDIO"]
+        models = os.environ["RSTT_E2E_MODELS"]
         cls.whisper = os.path.join(models, "whisper-large-v3-turbo")
         cls.seg = os.path.join(models, "diar", "sherpa-onnx-pyannote-segmentation-3-0", "model.onnx")
         cls.emb = os.path.join(models, "diar", "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx")

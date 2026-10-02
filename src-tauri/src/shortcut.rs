@@ -1,6 +1,6 @@
 //! Atalho global de gravação (agente B). Registrado **pelo Rust** (a UI não precisa de permissão do
 //! plugin). Só funciona em X11: no Wayland (inclui XWayland) não registra e expõe
-//! `shortcut_supported = false`; o usuário usa o `bind` do compositor + `transcricoes record toggle`.
+//! `shortcut_supported = false`; o usuário usa o `bind` do compositor + `rstt record toggle`.
 use core_lib::recording::keys;
 use serde::Serialize;
 use tauri::{AppHandle, Manager, Wry, plugin::TauriPlugin};

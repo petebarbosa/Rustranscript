@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Rustranscript
+GenericName=Meeting recorder and transcriber
+Comment=Record and transcribe your meetings locally
+Comment[pt_BR]=Grave e transcreva suas reuniões localmente
+Exec=rstt
+Icon=rustranscript
+Terminal=false
+Categories=AudioVideo;Office;
+Keywords=record;transcribe;meeting;call;speech;
+StartupWMClass=rstt

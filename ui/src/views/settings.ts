@@ -6,20 +6,20 @@ import { esc, fmtNumber, toast } from '../util'
 import { mountTranscriptionSettings } from './txsettings'
 
 // Trechos do compositor (RECORDING_CONTRACT §10.5, verificados em out/2026). A regra casa pelo título INICIAL da janela.
-const HYPR_CONF = `windowrule = match:title ^(transcricoes-bar)$, float on
-windowrule = match:title ^(transcricoes-bar)$, pin on
-windowrule = match:title ^(transcricoes-bar)$, no_initial_focus on
-windowrule = match:title ^(transcricoes-bar)$, move (monitor_w-window_w-20) 20
-bind = CTRL ALT, R, exec, transcricoes record toggle`
+const HYPR_CONF = `windowrule = match:title ^(rstt-bar)$, float on
+windowrule = match:title ^(rstt-bar)$, pin on
+windowrule = match:title ^(rstt-bar)$, no_initial_focus on
+windowrule = match:title ^(rstt-bar)$, move (monitor_w-window_w-20) 20
+bind = CTRL ALT, R, exec, rstt record toggle`
 const HYPR_LUA = `hl.window_rule({
-  name = "transcricoes-bar",
-  match = { title = "^(transcricoes-bar)$" },
+  name = "rstt-bar",
+  match = { title = "^(rstt-bar)$" },
   float = true,
   pin = true,
   no_initial_focus = true,
   move = { "monitor_w-window_w-20", "20" },
 })
-hl.bind("CTRL + ALT + R", hl.dsp.exec_cmd("transcricoes record toggle"))`
+hl.bind("CTRL + ALT + R", hl.dsp.exec_cmd("rstt record toggle"))`
 
 const valueChoice = (v: string): StreamChoice => (v === 'default' || v === 'off' ? v : { named: v.slice(4) })
 
@@ -93,7 +93,7 @@ export async function renderSettings(el: HTMLElement): Promise<View> {
         <p class="font-semibold text-amber-200">${esc(t('record.warn_title'))}</p>
         <ul class="mt-2 list-disc space-y-1.5 pl-5"><li>${esc(t('record.warn_monitor'))}</li><li>${esc(t('record.warn_screen'))}</li><li>${esc(t('record.warn_consent'))}</li></ul></div>
 
-      ${wayland && !hypr ? `<p class="text-xs text-zinc-500">${esc(t('settings.record.wayland_other'))} <code class="rounded bg-ink-950 px-1.5 py-0.5 text-zinc-300">transcricoes record toggle</code></p>` : ''}
+      ${wayland && !hypr ? `<p class="text-xs text-zinc-500">${esc(t('settings.record.wayland_other'))} <code class="rounded bg-ink-950 px-1.5 py-0.5 text-zinc-300">rstt record toggle</code></p>` : ''}
       <details id="rec-hypr" ${hypr ? 'open' : ''} class="rounded-xl border border-white/10 bg-ink-950/50 p-4">
         <summary class="cursor-pointer text-sm font-medium text-zinc-200">${esc(t('settings.record.hypr_title'))}</summary>
         <p class="mt-3 text-xs text-zinc-500">${esc(t('settings.record.hypr_intro'))}</p>
@@ -144,12 +144,12 @@ export async function renderSettings(el: HTMLElement): Promise<View> {
       <section class="mt-8 rounded-2xl border border-white/10 bg-ink-900/60 p-5 text-sm text-zinc-400">
         <h2 class="font-semibold text-white">${esc(t('settings.cli_title'))}</h2>
         <p class="mt-1">${esc(t('settings.cli_hint'))}</p>
-        <pre class="mt-3 overflow-x-auto rounded-xl bg-ink-950 p-3 text-xs text-zinc-300">transcricoes list
-transcricoes search "gateway service"
-transcricoes show call_AAAA-MM-DD_HH-MM-SS --text
-transcricoes edit block call_… 12 "${esc(t('settings.cli_fixed_text'))}" --dry-run
-transcricoes undo call_…
-transcricoes --help</pre>
+        <pre class="mt-3 overflow-x-auto rounded-xl bg-ink-950 p-3 text-xs text-zinc-300">rstt list
+rstt search "gateway service"
+rstt show call_AAAA-MM-DD_HH-MM-SS --text
+rstt edit block call_… 12 "${esc(t('settings.cli_fixed_text'))}" --dry-run
+rstt undo call_…
+rstt --help</pre>
       </section></div>`
 
     el.querySelector('#lang')!.addEventListener('change', async e => {

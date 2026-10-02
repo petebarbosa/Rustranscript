@@ -1,9 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Transcrições",
-  "mainBinaryName": "transcricoes",
+  "productName": "Rustranscript",
+  "mainBinaryName": "rstt",
   "version": "0.1.0",
-  "identifier": "app.transcricoes.desktop",
+  "identifier": "io.github.petebarbosa.rustranscript",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://127.0.0.1:5173",
@@ -16,7 +16,7 @@
       {
         "label": "main",
         "visible": false,
-        "title": "Transcrições",
+        "title": "Rustranscript",
         "width": 1200,
         "height": 820,
         "minWidth": 720,
@@ -52,13 +52,19 @@
     "active": true,
     "targets": ["appimage"],
     "category": "Productivity",
-    "shortDescription": "Gravação e transcrição de reuniões, local",
+    "shortDescription": "Record and transcribe your meetings locally",
+    "longDescription": "Records your calls, transcribes them and separates the speakers. Everything stays on your machine.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    }
   }
 }

@@ -1,7 +1,7 @@
 //! Captura de áudio da fase 3: mic + áudio do sistema → WAV incremental à prova de queda + sidecar.
 //! Não depende do núcleo (o núcleo é que depende deste crate). Contrato completo: `RECORDING_CONTRACT.md`.
 //!
-//! - `backend`: traits `CaptureBackend`/`CaptureStream` + `default_backend()` (env `TRANSCRICOES_FAKE_AUDIO`).
+//! - `backend`: traits `CaptureBackend`/`CaptureStream` + `default_backend()` (env `RSTT_FAKE_AUDIO`).
 //! - `pulse` (Linux, feature `pulse`): libpulse. `fake`: tons sintéticos, sem dispositivos.
 //! - `session`: `Session` (gravar), `Monitor` (só níveis), `StreamChoice`.
 //! - `wav`: `WavWriter`, `repair_wav`. `sidecar`: `recording.json`. `levels`: medidores.

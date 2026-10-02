@@ -22,6 +22,6 @@ pkgbase = rustranscript
 	options = !lto
 	options = !debug
 	source = rustranscript-0.1.0.tar.gz::https://github.com/petebarbosa/Rustranscript/archive/refs/tags/v0.1.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = 6f9cc9668e0c44c1019e97b55def9c64c7d9ef0a2e432f0ebee718504a66dd09
 
 pkgname = rustranscript

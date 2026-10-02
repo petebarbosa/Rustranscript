@@ -10,9 +10,8 @@ depends=('webkit2gtk-4.1' 'gtk3' 'libpulse' 'libayatana-appindicator' 'glib2' 'd
 makedepends=('cargo' 'nodejs' 'npm' 'git')
 optdepends=('xdg-utils: open links and folders from the app')
 options=('!lto' '!debug')
-# Tag v$pkgver must exist on GitHub. Replace SKIP with the real checksum once it is published.
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('6f9cc9668e0c44c1019e97b55def9c64c7d9ef0a2e432f0ebee718504a66dd09')
 
 prepare() {
   cd "Rustranscript-$pkgver"

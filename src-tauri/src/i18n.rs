@@ -89,6 +89,48 @@ pub fn error_prefix(lang: Lang, code: &str) -> &'static str {
         ("not_implemented", PtBr) => "ainda não implementado",
         ("not_implemented", EnUs) => "not implemented yet",
         ("not_implemented", Es419) => "aún no implementado",
+        ("runtime_missing", PtBr) => "o ambiente de transcrição não está instalado (rode `setup install`)",
+        ("runtime_missing", EnUs) => "the transcription runtime is not installed (run `setup install`)",
+        ("runtime_missing", Es419) => "el entorno de transcripción no está instalado (ejecuta `setup install`)",
+        ("runtime_outdated", PtBr) => "o ambiente de transcrição está desatualizado (rode `setup install`)",
+        ("runtime_outdated", EnUs) => "the transcription runtime is outdated (run `setup install`)",
+        ("runtime_outdated", Es419) => "el entorno de transcripción está desactualizado (ejecuta `setup install`)",
+        ("models_missing", PtBr) => "faltam modelos de transcrição (rode `setup install`)",
+        ("models_missing", EnUs) => "transcription models are missing (run `setup install`)",
+        ("models_missing", Es419) => "faltan modelos de transcripción (ejecuta `setup install`)",
+        ("setup_failed", PtBr) => "falha ao instalar o ambiente de transcrição",
+        ("setup_failed", EnUs) => "failed to install the transcription runtime",
+        ("setup_failed", Es419) => "falló la instalación del entorno de transcripción",
+        ("setup_cancelled", PtBr) => "instalação cancelada",
+        ("setup_cancelled", EnUs) => "setup cancelled",
+        ("setup_cancelled", Es419) => "instalación cancelada",
+        ("download_failed", PtBr) => "falha no download",
+        ("download_failed", EnUs) => "download failed",
+        ("download_failed", Es419) => "falló la descarga",
+        ("checksum_mismatch", PtBr) => "o arquivo baixado não confere com a soma de verificação",
+        ("checksum_mismatch", EnUs) => "the downloaded file does not match its checksum",
+        ("checksum_mismatch", Es419) => "el archivo descargado no coincide con su suma de verificación",
+        ("worker_crashed", PtBr) => "o processo de transcrição caiu",
+        ("worker_crashed", EnUs) => "the transcription process crashed",
+        ("worker_crashed", Es419) => "el proceso de transcripción falló",
+        ("worker_protocol", PtBr) => "resposta inesperada do processo de transcrição",
+        ("worker_protocol", EnUs) => "unexpected reply from the transcription process",
+        ("worker_protocol", Es419) => "respuesta inesperada del proceso de transcripción",
+        ("audio_decode", PtBr) => "não foi possível decodificar o áudio",
+        ("audio_decode", EnUs) => "could not decode the audio",
+        ("audio_decode", Es419) => "no se pudo decodificar el audio",
+        ("no_audio", PtBr) => "a chamada não tem áudio",
+        ("no_audio", EnUs) => "the call has no audio",
+        ("no_audio", Es419) => "la llamada no tiene audio",
+        ("oom", PtBr) => "memória insuficiente para transcrever",
+        ("oom", EnUs) => "not enough memory to transcribe",
+        ("oom", Es419) => "memoria insuficiente para transcribir",
+        ("no_raw_data", PtBr) => "a versão não tem dados brutos (foi importada)",
+        ("no_raw_data", EnUs) => "the version has no raw data (it was imported)",
+        ("no_raw_data", Es419) => "la versión no tiene datos en bruto (fue importada)",
+        ("job_failed", PtBr) => "a transcrição falhou",
+        ("job_failed", EnUs) => "transcription failed",
+        ("job_failed", Es419) => "la transcripción falló",
         (_, PtBr) => "erro",
         (_, EnUs) => "error",
         (_, Es419) => "error",
@@ -190,6 +232,52 @@ fn lookup(lang: Lang, key: &str) -> &'static str {
         ("rec_error_title", PtBr) => "Gravação",
         ("rec_error_title", EnUs) => "Recording",
         ("rec_error_title", Es419) => "Grabación",
+        ("setup_runtime", PtBr) => "instalando o ambiente de transcrição",
+        ("setup_runtime", EnUs) => "installing the transcription runtime",
+        ("setup_runtime", Es419) => "instalando el entorno de transcripción",
+        ("setup_model", PtBr) => "baixando o modelo",
+        ("setup_model", EnUs) => "downloading model",
+        ("setup_model", Es419) => "descargando el modelo",
+        ("setup_done", PtBr) => "instalação concluída",
+        ("setup_done", EnUs) => "setup finished",
+        ("setup_done", Es419) => "instalación terminada",
+        ("queue_cancel_running", PtBr) => "a tarefa está em andamento; cancele pela janela do app",
+        ("queue_cancel_running", EnUs) => "the job is running; cancel it from the app window",
+        ("queue_cancel_running", Es419) => "la tarea está en curso; cancélala desde la ventana de la app",
+        ("gui_not_started", PtBr) => "a app não abriu; a tarefa fica na fila até a app ser aberta",
+        ("gui_not_started", EnUs) => "the app did not start; the job stays queued until the app is opened",
+        ("gui_not_started", Es419) => "la app no se abrió; la tarea queda en cola hasta que se abra la app",
         _ => "",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LANGS: [Lang; 3] = [Lang::PtBr, Lang::EnUs, Lang::Es419];
+
+    /// Todo código de erro da fase 4 tem texto próprio nas 3 línguas (e não cai no genérico).
+    #[test]
+    fn transcription_error_codes_are_translated() {
+        let codes = [
+            "runtime_missing", "runtime_outdated", "models_missing", "setup_failed", "setup_cancelled", "download_failed",
+            "checksum_mismatch", "worker_crashed", "worker_protocol", "audio_decode", "no_audio", "oom", "no_raw_data", "job_failed",
+        ];
+        for lang in LANGS {
+            for code in codes {
+                let text = error_prefix(lang, code);
+                assert!(!matches!(text, "erro" | "error"), "{code} sem tradução em {}", lang.tag());
+            }
+        }
+    }
+
+    #[test]
+    fn transcription_messages_exist_in_all_languages() {
+        for key in ["setup_runtime", "setup_model", "setup_done", "queue_cancel_running", "gui_not_started"] {
+            for lang in LANGS {
+                assert!(!lookup(lang, key).is_empty(), "{key} sem tradução em {}", lang.tag());
+            }
+        }
     }
 }

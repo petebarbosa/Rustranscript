@@ -57,6 +57,8 @@ pub struct TranscriptInfo {
     pub source_file: Option<String>,
     pub created_at: String,
     pub is_active: bool,
+    /// Tem o bruto da transcrição (`tx_*`): só então `rediarize`/`resegment` são possíveis. Importadas: `false`.
+    pub has_raw: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

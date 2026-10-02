@@ -41,3 +41,8 @@ dialog[open] { animation: pop .12s ease-out; }
 .nav-item[aria-current="page"] { background: rgba(255,255,255,.06); color: #fff; }
 
 input[type="search"]::-webkit-search-cancel-button { display: none; }
+
+/* barra indeterminada */
+.indet { animation: indet 1.3s ease-in-out infinite; }
+@keyframes indet { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
+@media (prefers-reduced-motion: reduce) { .indet { animation: none; width: 100%; opacity: .5; } }

@@ -40,6 +40,32 @@ CREATE TABLE models (
 r#"
 ALTER TABLE glossary_global ADD COLUMN source_edit_id INTEGER;
 ALTER TABLE glossary_global ADD COLUMN source_library_id INTEGER;
+"#,
+// 3 (fase 4): fila de transcrição (dona: a GUI). Uma tarefa por chamada em aberto (queued|running).
+// `library_id`/`call_id` não têm FK (bancos diferentes); mover a chamada com tarefa aberta = `conflict`.
+// `base_job_id` = tarefa cujo bruto (`tx_*` na biblioteca) alimenta `rediarize`/`resegment`.
+r#"
+CREATE TABLE transcription_jobs (
+    id            INTEGER PRIMARY KEY,
+    library_id    INTEGER NOT NULL,
+    call_id       INTEGER NOT NULL,
+    call_key      TEXT NOT NULL,
+    kind          TEXT NOT NULL CHECK (kind IN ('full', 'rediarize', 'resegment')),
+    state         TEXT NOT NULL CHECK (state IN ('queued', 'running', 'done', 'failed', 'cancelled')),
+    options_json  TEXT NOT NULL DEFAULT '{}',
+    base_job_id   INTEGER,
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    stage         TEXT,
+    progress      REAL,
+    error_code    TEXT,
+    error_detail  TEXT,
+    created_at    TEXT NOT NULL,
+    started_at    TEXT,
+    finished_at   TEXT
+);
+CREATE INDEX transcription_jobs_open ON transcription_jobs(state, id) WHERE state IN ('queued', 'running');
+CREATE UNIQUE INDEX transcription_jobs_one_open ON transcription_jobs(library_id, call_id)
+    WHERE state IN ('queued', 'running');
 "#];
 
 pub const LIBRARY_MIGRATIONS: &[&str] = &[r#"
@@ -190,4 +216,60 @@ ALTER TABLE calls ADD COLUMN transcription_state TEXT NOT NULL DEFAULT 'done'
     CHECK (transcription_state IN ('pending', 'running', 'done', 'failed'));
 ALTER TABLE calls ADD COLUMN transcription_error TEXT;
 CREATE INDEX calls_transcription_open ON calls(transcription_state) WHERE transcription_state <> 'done';
+"#,
+// 4 (fase 4): bruto da transcrição (segmentos por trilha, turnos da diarização, energia) indexado por
+// `job_id` (id de `app.db.transcription_jobs`, único no app). Serve de staging durante a tarefa (cada janela
+// do Whisper é gravada na hora → retomável) e fica depois da versão criada, para `rediarize`/`resegment`
+// sem retranscrever. `transcripts.raw_job_id` liga a versão ao seu bruto e é ÚNICO: impede versão duplicada
+// se a tarefa for repetida depois de a versão já ter sido criada.
+r#"
+ALTER TABLE transcripts ADD COLUMN raw_job_id INTEGER;
+CREATE UNIQUE INDEX transcripts_raw_job ON transcripts(raw_job_id) WHERE raw_job_id IS NOT NULL;
+
+-- etapa concluída (o `result` do worker chegou); sem linha = a etapa recomeça (ASR: do último `t_end`)
+CREATE TABLE tx_stage (
+    job_id     INTEGER NOT NULL,
+    stage      TEXT NOT NULL CHECK (stage IN ('asr_sys', 'asr_mic', 'energy', 'diarize')),
+    done_at    TEXT NOT NULL,
+    info_json  TEXT,
+    PRIMARY KEY (job_id, stage)
+);
+-- tempos SEMPRE do arquivo da trilha (o offset mic×sys é aplicado só na montagem)
+CREATE TABLE tx_segments (
+    job_id      INTEGER NOT NULL,
+    track       TEXT NOT NULL CHECK (track IN ('mic', 'sys')),
+    seq         INTEGER NOT NULL,
+    t_start     REAL NOT NULL,
+    t_end       REAL NOT NULL,
+    text        TEXT NOT NULL,
+    words_json  TEXT,                         -- [[inicio, fim, "palavra"], ...] ou NULL
+    PRIMARY KEY (job_id, track, seq)
+);
+CREATE TABLE tx_turns (
+    job_id   INTEGER NOT NULL,
+    seq      INTEGER NOT NULL,
+    t_start  REAL NOT NULL,
+    t_end    REAL NOT NULL,
+    cluster  INTEGER NOT NULL,                -- rótulo bruto do worker (0, 1, ...), antes da fusão
+    PRIMARY KEY (job_id, seq)
+);
+CREATE TABLE tx_energy (
+    job_id   INTEGER NOT NULL,
+    track    TEXT NOT NULL CHECK (track IN ('mic', 'sys')),
+    step_ms  INTEGER NOT NULL,
+    db_json  TEXT NOT NULL,                   -- [dBFS por passo], 1 casa decimal
+    PRIMARY KEY (job_id, track)
+);
+-- auditoria do filtro de vazamento (segmentos do mic descartados)
+CREATE TABLE bleed_removals (
+    id             INTEGER PRIMARY KEY,
+    transcript_id  INTEGER NOT NULL REFERENCES transcripts(id) ON DELETE CASCADE,
+    t_start        REAL NOT NULL,
+    t_end          REAL NOT NULL,
+    text           TEXT NOT NULL,
+    containment    REAL,
+    margin_db      REAL,
+    reason         TEXT NOT NULL CHECK (reason IN ('text_and_energy', 'energy_short'))
+);
+CREATE INDEX bleed_removals_transcript ON bleed_removals(transcript_id);
 "#];

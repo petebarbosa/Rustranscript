@@ -35,7 +35,7 @@ impl App {
         let data_dir = data_dir.canonicalize()?;
         let db = db::open(&data_dir.join("app.db"), schema::APP_MIGRATIONS)?;
         db.execute(
-            "INSERT INTO libraries (name, kind, path, created_at)
+            "INSERT OR IGNORE INTO libraries (name, kind, path, created_at)
              SELECT '', 'inbox', '', ?1 WHERE NOT EXISTS (SELECT 1 FROM libraries WHERE kind = 'inbox')",
             [db::now()],
         )?;

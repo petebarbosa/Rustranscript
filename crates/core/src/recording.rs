@@ -162,10 +162,11 @@ impl Intent {
     }
 }
 
-/// `pt`, `en`, `es` (aceita também `pt-BR`, `en_US`, `es-419`...).
-fn language_code(raw: &str) -> Option<&'static str> {
+/// `pt`, `en`, `es` (aceita também `pt-BR`, `en_US`, `es-419`...) ou `auto` (detectar o idioma, fase 4).
+pub fn language_code(raw: &str) -> Option<&'static str> {
     let lower = raw.trim().to_lowercase();
     match lower.split(['-', '_']).next()? {
+        "auto" => Some("auto"),
         "pt" => Some("pt"),
         "en" => Some("en"),
         "es" => Some("es"),

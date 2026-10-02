@@ -2,7 +2,8 @@
 // Dados 100% sintéticos. Nunca é carregado dentro do Tauri.
 import { mockIPC } from '@tauri-apps/api/mocks'
 import { emit } from '@tauri-apps/api/event'
-import type { ApplyReport, BlockChange, BlockInfo, BlockSuggestion, CallDetail, ClientInfo, DeviceInfo, GlossaryImportEntry, HistoryEntry, Hit, LibraryInfo, LevelsEvent, Orphan, RecordingInfo, RecordStatus, Rule, SpeakerInfo, StreamChoice, StreamLevel, StreamStatus } from './api'
+import { TRANSCRIPTION_DEFAULTS } from './api'
+import type { ApplyReport, BleedRemoval, BlockChange, BlockInfo, BlockSuggestion, CallDetail, ClientInfo, DeviceInfo, GlossaryImportEntry, HistoryEntry, Hit, JobInfo, JobKind, JobOptions, JobProgress, JobStage, LibraryInfo, LevelsEvent, ModelStatus, PauseReason, QueueStatus, Orphan, RecordingInfo, RecordStatus, Rule, SpeakerInfo, StreamChoice, StreamLevel, StreamStatus } from './api'
 
 type Args = Record<string, any>
 
@@ -40,7 +41,7 @@ function mkCall(library_id: number, id: number, key: string, title: string, clie
     library_id, id, key, title, client_id, client_name: null, started_at: `${date}T${time}`,
     duration_s: lines[lines.length - 1][0] + 30, versions: 1, has_audio: true, language: 'pt', expected_speakers: null,
     transcription_state: 'done', transcription_error: null,
-    transcript_id: 1, transcripts: [{ id: 1, version: 1, model: 'large-v3-turbo', engine: 'faster-whisper', source_file: key + '.txt', created_at: now(), is_active: true }],
+    transcript_id: 1, transcripts: [{ id: 1, version: 1, model: 'large-v3-turbo', engine: 'faster-whisper', source_file: key + '.txt', created_at: now(), is_active: true, has_raw: false }],
     speakers, blocks, chapters: [], audio: { mic_path: 'mic.flac', sys_path: 'sys.flac', deleted_at: null },
   }
 }
@@ -61,7 +62,7 @@ function mkPending(library_id: number, id: number, key: string, title: string, c
 function addVersion(c: Call, model: string, lines: [number, string, string][]) {
   const v2 = mkCall(c.library_id, c.id, c.key, c.title, c.client_id, lines)
   const id = 2
-  c.transcripts.push({ id, version: 2, model, engine: 'faster-whisper', source_file: c.key + '_v2.txt', created_at: now(), is_active: false })
+  c.transcripts.push({ id, version: 2, model, engine: 'faster-whisper', source_file: c.key + '_v2.txt', created_at: now(), is_active: false, has_raw: false })
   c.other = { ...(c.other ?? {}), [id]: { blocks: v2.blocks, speakers: v2.speakers } }
 }
 
@@ -132,7 +133,7 @@ const norm = (s: string) => s.replace(/\s+/g, ' ').trim()
 const fold = (s: string) => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase()
 
 const handlers: Record<string, (a: Args) => unknown> = {
-  bootstrap: () => ({ data_dir: '/dados', system_language: 'pt-BR', inbox_id: 1, settings, libraries: handlers.libraries({}) }),
+  bootstrap: () => ({ data_dir: '/dados', system_language: 'pt-BR', inbox_id: 1, settings: effSettings(), libraries: handlers.libraries({}) }),
   libraries: () => libs.map(l => ({
     ...l,
     call_count: calls.filter(c => c.library_id === l.id).length,
@@ -235,7 +236,7 @@ const handlers: Record<string, (a: Args) => unknown> = {
   set_setting: a => {
     // mesma lista de chaves de gui.rs::set_setting
     // gui.rs::set_setting; `record_shortcut` NÃO está na lista (só `record_set_shortcut` escreve)
-    if (!['language', 'me_name', 'transcription_language', 'last_library_id', 'last_client_id', 'record_library_id', 'record_client_id', 'record_mic', 'record_sys', 'record_bar_on_start'].includes(a.key)) throw { code: 'invalid', detail: `unknown setting ${a.key}` }
+    if (!['language', 'me_name', 'transcription_language', ...Object.keys(TRANSCRIPTION_DEFAULTS), 'last_library_id', 'last_client_id', 'record_library_id', 'record_client_id', 'record_mic', 'record_sys', 'record_bar_on_start'].includes(a.key)) throw { code: 'invalid', detail: `unknown setting ${a.key}` }
     if (a.value == null || !String(a.value).trim()) delete settings[a.key]; else settings[a.key] = a.value
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)) } catch {}
   },
@@ -697,18 +698,321 @@ Object.assign(handlers, {
   bar_show: () => { rec.barVisible = true; pushState(); return null },
   bar_hide: () => { rec.barVisible = false; pushState(); return null },
   show_main_window: () => null,
+  // ---- transcrição: ver o bloco "transcrição (fase 4)" abaixo
 })
+
+// ---------------------------------------------------------------- transcrição (fase 4)
+// Simulação temporizada fiel ao TRANSCRIPTION_CONTRACT §4/§5/§9: fila (um job por vez), etapas com progresso em rajadas de
+// 30 s no ASR e 1ª fase indeterminada na diarização, pausa por gravação/usuário, falha, instalação com download retomável.
+// Flags na URL (o idioma recarrega a página, então vão na query): ?runtime=missing · ?paused=recording · ?fail[=código]
+// · ?hold=<etapa> (congela a tarefa nessa etapa, para capturas) · ?fake (modo de teste) · ?auto=0 (fila não automática).
+const qp = new URLSearchParams(location.search)
+const txFlag = {
+  missing: qp.get('runtime') === 'missing', forcePause: qp.get('paused') === 'recording',
+  fail: qp.has('fail') ? qp.get('fail') || 'audio_decode' : null, hold: qp.get('hold') as JobStage | null,
+  fake: qp.has('fake'), manual: qp.get('auto') === '0',
+}
+function effSettings() { return txFlag.manual ? { ...settings, transcription_auto: '0' } : { ...settings } }
+
+const MODEL_FILES: Record<ModelStatus['id'], string> = {
+  whisper: 'model.bin', segmentation: 'segmentation-3-0.tar.bz2', embedding: 'campplus_zh_en_16k.onnx',
+}
+const models: ModelStatus[] = [
+  { id: 'whisper', installed: !txFlag.missing, bytes_total: 1_621_665_983, bytes_done: txFlag.missing ? 0 : 1_621_665_983, local: false },
+  { id: 'segmentation', installed: !txFlag.missing, bytes_total: 6_935_020, bytes_done: txFlag.missing ? 0 : 6_935_020, local: false },
+  { id: 'embedding', installed: !txFlag.missing, bytes_total: 28_300_000, bytes_done: txFlag.missing ? 0 : 28_300_000, local: false },
+]
+let runtimeReady = !txFlag.missing
+const jobs: JobInfo[] = []
+let jobSeq = 0
+const bleedBy = new Map<number, BleedRemoval[]>() // por id da versão (único no mock)
+
+// ---- instalação (retomável: o que já veio fica em bytes_done)
+let setupRun: { cancel: boolean; phase: 'runtime' | 'models' } | null = null
+async function runSetup() {
+  const me: NonNullable<typeof setupRun> = (setupRun = { cancel: false, phase: 'runtime' })
+  const ev = (o: Partial<SetupEv>) => emit('transcription-setup', { phase: 'runtime', step: null, index: null, of: null, model: null, file: null, bytes_done: null, bytes_total: null, error: null, ...o })
+  try {
+    if (!runtimeReady) {
+      const steps = ['download_uv', 'install_python', 'create_venv', 'sync_packages', 'verify'] as const
+      for (let i = 0; i < steps.length; i++) {
+        if (me.cancel) throw 0
+        await ev({ phase: 'runtime', step: steps[i], index: i + 1, of: steps.length })
+        await sleep(steps[i] === 'sync_packages' ? 1500 : 700)
+      }
+      runtimeReady = true
+    }
+    me.phase = 'models'
+    const todo = models.filter(m => !m.installed)
+    for (let i = 0; i < todo.length; i++) {
+      const m = todo[i]
+      const chunk = Math.ceil(m.bytes_total / (m.id === 'whisper' ? 50 : 8))
+      while (m.bytes_done < m.bytes_total) {
+        if (me.cancel) throw 0
+        m.bytes_done = Math.min(m.bytes_total, m.bytes_done + chunk)
+        await ev({ phase: 'models', index: i + 1, of: todo.length, model: m.id, file: MODEL_FILES[m.id], bytes_done: m.bytes_done, bytes_total: m.bytes_total })
+        await sleep(110)
+      }
+      m.installed = true
+    }
+    setupRun = null
+    await ev({ phase: 'finished' })
+  } catch {
+    setupRun = null
+    await ev({ phase: 'finished', error: { code: 'setup_cancelled', detail: '' } })
+  }
+}
+type SetupEv = { phase: string; step: string | null; index: number | null; of: number | null; model: string | null; file: string | null; bytes_done: number | null; bytes_total: number | null; error: { code: string; detail: string } | null }
+
+const txReady = () => txFlag.fake || (runtimeReady && models.every(m => m.installed))
+function txStatus() {
+  return {
+    runtime: { state: txFlag.fake ? 'fake' : runtimeReady ? 'ready' : 'missing', runtime_version: 1, python: '3.12.15', uv: '0.12.22', installed_at: runtimeReady ? now() : null },
+    models: structuredClone(models), setup: { running: !!setupRun, phase: setupRun?.phase ?? null }, queue: queueStatus(), fake_worker: txFlag.fake,
+  }
+}
+
+// ---- fila
+const pausedReason = (): PauseReason | null => (settings.transcription_queue_paused === '1' ? 'user' : rec.cur || txFlag.forcePause ? 'recording' : null)
+function queueStatus(): QueueStatus {
+  const running = jobs.filter(j => j.state === 'running')
+  const queued = jobs.filter(j => j.state === 'queued').sort((a, b) => a.id - b.id)
+  const done = jobs.filter(j => !['running', 'queued'].includes(j.state)).sort((a, b) => (b.finished_at ?? '').localeCompare(a.finished_at ?? '') || b.id - a.id).slice(0, 20)
+  return { paused: pausedReason(), jobs: structuredClone([...running, ...queued, ...done]) }
+}
+const pushQueue = () => void emit('queue-changed', queueStatus())
+const openJob = (c: Call) => jobs.find(j => j.library_id === c.library_id && j.call_id === c.id && (j.state === 'queued' || j.state === 'running'))
+const activeInfo = (c: Call) => c.transcripts.find(v => v.id === c.transcript_id)
+
+function enqueue(libraryId: number, callId: number, kind: JobKind = 'full', options: JobOptions | null = null): JobInfo {
+  const c = findCall(libraryId, callId)
+  if (!c.has_audio || c.audio.deleted_at || (!c.audio.mic_path && !c.audio.sys_path)) throw bad('no_audio', c.key)
+  if (openJob(c)) throw bad('conflict', 'call already has an open job')
+  if (kind !== 'full' && !activeInfo(c)?.has_raw) throw bad('no_raw_data', c.key)
+  const j: JobInfo = {
+    id: ++jobSeq, library_id: libraryId, call_id: callId, call_key: c.key, kind, state: 'queued',
+    options: { language: null, expected_speakers: null, bleed_filter: null, bleed_margin_db: null, diarization_threshold: null, ...(options ?? {}) },
+    base_job_id: kind === 'full' ? null : 1, attempts: 0, stage: null, progress: null, error_code: null, error_detail: null,
+    created_at: now(), started_at: null, finished_at: null,
+  }
+  jobs.push(j)
+  if (c.transcript_id == null && c.transcription_state === 'failed') { c.transcription_state = 'pending'; c.transcription_error = null }
+  pushQueue()
+  return j
+}
+
+// ---- execução de uma tarefa
+let cur: { id: number; abort: 'pause' | 'cancel' | null } | null = null
+const failedOnce = new Set<string>()
+
+const SAMPLE = [
+  'Bom dia a todos, vamos começar pelo resumo da semana.', 'O serviço de notificações ficou estável depois do ajuste.',
+  'Eu revisei o relatório e encontrei dois pontos para corrigir.', 'A fila de pagamentos precisa de mais um teste antes da entrega.',
+  'Combinado, eu envio o resumo ainda hoje.', 'Alguém sabe se o ambiente de testes já foi atualizado?',
+  'Sim, atualizamos ontem à noite, sem problemas.', 'Então fechamos o plano e marcamos a próxima conversa.',
+]
+const ECHO = ['o serviço de notificações ficou estável depois do ajuste', 'a fila de pagamentos precisa de mais um teste antes da entrega', 'então fechamos o plano e marcamos a próxima conversa']
+
+/** Versão nova com blocos `Eu`/`Pessoa N` (rótulos canônicos), nomes dos falantes preservados, removidos como eco registrados. */
+function commitVersion(c: Call, j: JobInfo) {
+  const prev = c.transcript_id != null ? { speakers: c.speakers, blocks: c.blocks } : null
+  const prevPeople = prev ? prev.speakers.filter(s => s.track === 'sys').length : 0
+  const n = j.kind === 'resegment' && prevPeople ? prevPeople : Math.min(20, Math.max(1, j.options.expected_speakers ?? c.expected_speakers ?? 2))
+  const bleedOn = j.options.bleed_filter !== false && settings.bleed_filter !== '0'
+  const names = new Map(prev?.speakers.map(s => [s.label, s.name]))
+  const speakers: SpeakerInfo[] = [{ id: ++seq, track: 'mic', label: 'Eu', name: names.get('Eu') ?? null }]
+  for (let i = 1; i <= n; i++) speakers.push({ id: ++seq, track: 'sys', label: `Pessoa ${i}`, name: names.get(`Pessoa ${i}`) ?? null })
+  const count = Math.min(30, Math.max(6, Math.round(c.duration_s / 25)))
+  const lines: { t: number; spk: SpeakerInfo; text: string; echo?: boolean }[] = []
+  for (let i = 0; i < count; i++) {
+    const t0 = Math.round((i * c.duration_s) / count)
+    lines.push({ t: t0, spk: i % 3 === 2 ? speakers[0] : speakers[1 + (i % n)], text: SAMPLE[i % SAMPLE.length] })
+  }
+  const removals: BleedRemoval[] = ECHO.map((text, i) => ({
+    id: i + 1, t_start: 40 + i * 70, t_end: 44 + i * 70, text, containment: 0.8 + i * 0.05, margin_db: i === 2 ? null : -22.1 - i * 3.4,
+    reason: i === 2 ? 'energy_short' : 'text_and_energy',
+  }))
+  // sem o filtro de eco, esses trechos do microfone ficam no texto
+  if (!bleedOn) removals.forEach(r => lines.push({ t: r.t_start, spk: speakers[0], text: r.text[0].toUpperCase() + r.text.slice(1) + '.', echo: true }))
+  lines.sort((a, b) => a.t - b.t)
+  const blocks: BlockInfo[] = lines.map((l, i) => ({ id: ++seq, seq: i + 1, t_start: l.t, t_end: l.t + 20, speaker_id: l.spk.id, text: l.text, original_text: l.text, edited: false }))
+  const id = ++seq
+  bleedBy.set(id, bleedOn ? removals : [])
+  if (prev) c.other = { ...(c.other ?? {}), [c.transcript_id!]: prev }
+  c.transcripts.forEach(v => (v.is_active = false))
+  c.transcripts.push({ id, version: c.transcripts.length + 1, model: 'large-v3-turbo', engine: 'faster-whisper', source_file: null, created_at: now(), is_active: true, has_raw: true })
+  Object.assign(c, { transcript_id: id, speakers, blocks, versions: c.transcripts.length, transcription_state: 'done', transcription_error: null })
+  return id
+}
+
+const sleepAbortable = async (ms: number) => { const end = Date.now() + ms; while (Date.now() < end && !cur!.abort) await sleep(Math.min(100, end - Date.now())) }
+
+async function runJob(j: JobInfo) {
+  const c = findCall(j.library_id, j.call_id)
+  const me = (cur = { id: j.id, abort: null })
+  const total = c.duration_s
+  const stages: JobStage[] = j.kind === 'full' ? ['preparing', 'loading_model', 'asr_sys', 'asr_mic', 'energy', 'diarize', 'assemble', 'commit']
+    : j.kind === 'rediarize' ? ['preparing', 'diarize', 'assemble', 'commit'] : ['preparing', 'assemble', 'commit']
+  Object.assign(j, { state: 'running', attempts: j.attempts + 1, started_at: now(), stage: 'preparing', progress: null })
+  if (c.transcript_id == null) c.transcription_state = 'running'
+  pushQueue()
+  const prog = (stage: JobStage, fraction: number | null, audio_s: number | null = null) => {
+    j.stage = stage; j.progress = fraction
+    const p: JobProgress = { job_id: j.id, library_id: j.library_id, call_id: j.call_id, stage, fraction, audio_s, total_s: audio_s == null ? null : total }
+    void emit('queue-progress', p)
+  }
+  for (const stage of stages) {
+    if (me.abort) break
+    j.stage = stage; j.progress = null
+    pushQueue()
+    if (txFlag.hold === stage) { // congela para capturas: ASR em 42 %, as demais etapas sem fração
+      prog(stage, stage.startsWith('asr') ? 0.42 : null, stage.startsWith('asr') ? total * 0.42 : null)
+      while (!me.abort) await sleep(150)
+      break
+    }
+    if (stage === 'preparing') await sleepAbortable(600)
+    else if (stage === 'loading_model') { prog(stage, null); await sleepAbortable(1200) }
+    else if (stage === 'asr_sys' || stage === 'asr_mic') {
+      // o whisper devolve o progresso em rajadas de 30 s de áudio
+      for (let a = 0; a < total && !me.abort; ) {
+        a = Math.min(total, a + 30)
+        prog(stage, a / total, a)
+        if (txFlag.fail && stage === 'asr_sys' && !failedOnce.has(c.key) && a >= Math.min(total, 30)) {
+          failedOnce.add(c.key)
+          Object.assign(j, { state: 'failed', error_code: txFlag.fail, error_detail: 'synthetic failure (mock): could not decode audio stream', finished_at: now() })
+          if (c.transcript_id == null) Object.assign(c, { transcription_state: 'failed', transcription_error: j.error_detail })
+          cur = null; pushQueue(); return
+        }
+        await sleepAbortable(300)
+      }
+    } else if (stage === 'energy') { for (let i = 1; i <= 5 && !me.abort; i++) { prog(stage, i / 5); await sleepAbortable(160) } }
+    else if (stage === 'diarize') {
+      prog(stage, null) // 1ª fase (~40 %) sem progresso
+      await sleepAbortable(1800)
+      for (let i = 1; i <= 8 && !me.abort; i++) { prog(stage, i / 8); await sleepAbortable(160) }
+      await sleepAbortable(1200) // depois da segmentação (8/8) não há mais progresso até o resultado
+    } else await sleepAbortable(450)
+  }
+  cur = null
+  if (me.abort === 'cancel') {
+    Object.assign(j, { state: 'cancelled', finished_at: now(), stage: null, progress: null })
+    if (c.transcript_id == null) c.transcription_state = 'pending'
+  } else if (me.abort === 'pause') { // volta à fila com o bruto preservado e segue sozinha depois
+    Object.assign(j, { state: 'queued', stage: null, progress: null })
+    if (c.transcript_id == null) c.transcription_state = 'pending'
+  } else {
+    const tid = commitVersion(c, j)
+    Object.assign(j, { state: 'done', finished_at: now(), stage: null, progress: null })
+    pushQueue()
+    await emit('data-changed', { event: 'transcribed', library_id: j.library_id, call_id: j.call_id, job_id: j.id, transcript_id: tid })
+    await emit('data-changed', { event: 'changed', library_id: j.library_id, call_id: j.call_id })
+    return
+  }
+  pushQueue()
+}
+
+let lastPause: PauseReason | null = null
+function txTick() {
+  const pause = pausedReason()
+  if (pause !== lastPause) { lastPause = pause; pushQueue() }
+  if (pause && cur) cur.abort ??= 'pause'
+  // `transcription_auto`: pega as chamadas pendentes sozinha (as com falha não voltam sozinhas)
+  if ((effSettings().transcription_auto ?? '1') === '1') {
+    for (const c of calls) if (c.transcript_id == null && c.transcription_state === 'pending' && c.has_audio && !openJob(c)) { try { enqueue(c.library_id, c.id) } catch { /* sem áudio */ } }
+  }
+  if (cur || pause || !txReady()) return
+  const next = jobs.filter(j => j.state === 'queued').sort((a, b) => a.id - b.id)[0]
+  if (next) void runJob(next)
+}
+
+// uma chamada já transcrita com bruto (Eu / Pessoa N) para testar separar vozes/remontar/eco sem esperar a fila
+{
+  const demo = mkCall(2, 5, 'call_2026-03-03_14-00-00', 'Retrospectiva (demo)', 1, [
+    [3, 'Pessoa 1', 'Bom dia a todos, vamos começar pelo resumo da semana.'],
+    [18, 'Eu', 'Bom dia. Eu revisei o relatório e encontrei dois pontos para corrigir.'],
+    [41, 'Pessoa 2', 'O serviço de notificações ficou estável depois do ajuste.'],
+    [66, 'Pessoa 1', 'A fila de pagamentos precisa de mais um teste antes da entrega.'],
+    [92, 'Pessoa 3', 'Alguém sabe se o ambiente de testes já foi atualizado?'],
+    [110, 'Eu', 'Combinado, eu envio o resumo ainda hoje.'],
+    [131, 'Pessoa 2', 'Sim, atualizamos ontem à noite, sem problemas.'],
+  ])
+  demo.expected_speakers = 3
+  demo.transcripts[0].id = demo.transcript_id = ++seq
+  demo.transcripts[0].has_raw = true
+  demo.transcripts[0].source_file = null
+  calls.push(demo)
+  bleedBy.set(demo.transcript_id, ECHO.map((text, i) => ({
+    id: i + 1, t_start: 40 + i * 70, t_end: 44 + i * 70, text, containment: 0.8 + i * 0.05, margin_db: i === 2 ? null : -22.1 - i * 3.4,
+    reason: (i === 2 ? 'energy_short' : 'text_and_energy') as BleedRemoval['reason'],
+  })))
+}
+Object.assign(handlers, {
+  transcription_status: () => txStatus(),
+  transcription_setup_start: () => {
+    if (setupRun) throw bad('conflict', 'setup already running')
+    void runSetup()
+    return null
+  },
+  transcription_setup_cancel: () => { if (setupRun) setupRun.cancel = true; return null },
+  models_import_local: (a: Args) => {
+    const m = models.find(x => x.id === a.model)
+    if (!m) throw bad('invalid', `unknown model ${a.model}`)
+    if (!String(a.path ?? '').trim()) throw bad('not_found', 'path')
+    Object.assign(m, { installed: true, bytes_done: m.bytes_total, local: true })
+    return structuredClone(models)
+  },
+  transcribe_enqueue: (a: Args) => enqueue(a.libraryId, a.callId, a.kind ?? 'full', a.options ?? null),
+  transcribe_pending: () => {
+    const out: JobInfo[] = []
+    for (const c of calls) if (c.transcript_id == null && c.transcription_state === 'pending' && !openJob(c)) { try { out.push(enqueue(c.library_id, c.id)) } catch { /* sem áudio */ } }
+    return out
+  },
+  queue_status: () => queueStatus(),
+  queue_cancel: (a: Args) => {
+    const j = jobs.find(x => x.id === a.jobId)
+    if (!j) throw bad('not_found', `job ${a.jobId}`)
+    if (j.state === 'running') { if (cur?.id === j.id) cur.abort = 'cancel' }
+    else if (j.state === 'queued') {
+      Object.assign(j, { state: 'cancelled', finished_at: now() })
+      pushQueue()
+    } else throw bad('conflict', 'job is not open')
+    return null
+  },
+  queue_retry: (a: Args) => {
+    const j = jobs.find(x => x.id === a.jobId)
+    if (!j) throw bad('not_found', `job ${a.jobId}`)
+    if (j.state === 'failed') { // mesma linha: preserva o bruto parcial
+      Object.assign(j, { state: 'queued', error_code: null, error_detail: null, finished_at: null, stage: null, progress: null })
+      const c = findCall(j.library_id, j.call_id)
+      if (c.transcript_id == null) Object.assign(c, { transcription_state: 'pending', transcription_error: null })
+      pushQueue()
+      return structuredClone(j)
+    }
+    if (j.state === 'cancelled') return enqueue(j.library_id, j.call_id, j.kind, j.options) // o bruto foi apagado: tarefa nova
+    throw bad('conflict', 'job is not failed or cancelled')
+  },
+  queue_pause: (a: Args) => {
+    if (a.paused) settings.transcription_queue_paused = '1'; else delete settings.transcription_queue_paused
+    saveSettings()
+    pushQueue()
+    return queueStatus()
+  },
+  bleed_removals: (a: Args) => structuredClone(bleedBy.get(a.transcriptId) ?? []),
+})
+
+const startTxSim = () => { setInterval(txTick, 400) }
 
 if (flags.has('orphans')) seedOrphans()
 
 export function install() {
+  startTxSim()
   mockIPC(async (cmd, args) => {
     const h = handlers[cmd]
     if (!h) throw { code: 'unknown', detail: `mock: ${cmd}` }
     return structuredClone(await h((args ?? {}) as Args))
   }, { shouldMockEvents: true })
   ;(window as any).__mock = {
-    calls, history, rules, rec,
+    calls, history, rules, rec, jobs, models,
     addOrphans: () => { seedOrphans(); emitOrphans() },
   }
   // startup real: o shell emite `record-recovery` se houver órfãs (a UI também pergunta por `record_orphans` no boot)

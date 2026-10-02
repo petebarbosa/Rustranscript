@@ -9,6 +9,7 @@ mod ipc;
 mod recording;
 mod shell;
 mod shortcut;
+mod transcription;
 mod tray;
 
 fn main() {

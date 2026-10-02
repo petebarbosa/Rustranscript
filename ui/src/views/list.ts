@@ -1,6 +1,7 @@
 import { api, type CallSummary } from '../api'
 import { t } from '../i18n'
 import { libName, store, type View } from '../store'
+import { jobForCall, subscribe as subscribeTx, tx } from '../tx'
 import { callTitle, esc, fmtClock, fmtDate, fmtDuration, fmtNumber, fold } from '../util'
 
 export type Scope =
@@ -39,10 +40,12 @@ function card(c: CallSummary, showPlace: boolean) {
   const place = lib?.kind === 'inbox' ? t('nav.unclassified') : [lib?.name, c.client_name].filter(Boolean).join(' · ')
   const chip = (s: string, cls = '') => `<span class="rounded-full bg-white/[0.04] px-2.5 py-0.5 ${cls}">${esc(s)}</span>`
   // gravação sem transcrição ainda (pending/running/failed): selo no lugar de palavras/prévia
-  const tr = c.transcription_state
+  const job = jobForCall(c.library_id, c.id)
+  // na fila (tarefa `queued`) a chamada continua `pending` no banco; o selo vem da fila
+  const tr = c.transcription_state === 'pending' && job?.state === 'queued' ? 'queued' : c.transcription_state
   const pending = tr !== 'done'
   const badge = pending
-    ? chip(t(`transcription.${tr}`), tr === 'failed' ? 'text-rose-300 bg-rose-400/10' : tr === 'running' ? 'text-sky-300 bg-sky-400/10' : 'text-amber-300 bg-amber-400/10')
+    ? chip(t(`transcription.${tr}`), tr === 'failed' ? 'text-rose-300 bg-rose-400/10' : tr === 'running' ? 'text-sky-300 bg-sky-400/10' : tr === 'queued' ? 'text-violet-300 bg-violet-400/10' : 'text-amber-300 bg-amber-400/10')
     : ''
   const search = esc(fold(`${callTitle(c)} ${c.preview} ${place}`))
   return `<a href="#/call/${c.library_id}/${c.id}" data-card data-search="${search}"
@@ -79,7 +82,9 @@ export async function renderList(el: HTMLElement, scope: Scope): Promise<View> {
         <h2 class="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">${esc(fmtDate(d))}</h2>
         <div class="grid gap-3 xl:grid-cols-2">${cs.map(c => card(c, showPlace)).join('')}</div>
       </section>`).join('')
-    const q = el.querySelector<HTMLInputElement>('#list-q')?.value ?? ''
+    const prev = el.querySelector<HTMLInputElement>('#list-q')
+    const q = prev?.value ?? ''
+    const hadFocus = !!prev && document.activeElement === prev
     el.innerHTML = `<div class="mx-auto max-w-5xl px-6 py-10">
       <h1 class="text-3xl font-semibold tracking-tight text-white">${esc(title)}</h1>
       ${sub ? `<p class="mt-1 text-sm text-zinc-500">${esc(sub)}</p>` : ''}
@@ -101,13 +106,19 @@ export async function renderList(el: HTMLElement, scope: Scope): Promise<View> {
     }
     input?.addEventListener('input', run)
     if (q) run()
+    if (hadFocus && input) { input.focus(); input.setSelectionRange(q.length, q.length) }
   }
   await draw()
+  // a fila mudou de estado (entrou, começou, falhou, terminou): refaz os selos
+  let sig = ''
+  const jobsSig = () => tx.queue.jobs.map(j => `${j.id}:${j.state}`).join(',')
+  sig = jobsSig()
+  const offQueue = subscribeTx('queue', () => { const n = jobsSig(); if (n !== sig) { sig = n; void draw() } })
   const onKey = (e: KeyboardEvent) => {
     const input = el.querySelector<HTMLInputElement>('#list-q')
     if (!input || (e.target as HTMLElement).matches('input, textarea, [contenteditable]')) return
     if (e.key === '/') { e.preventDefault(); input.focus() }
   }
   document.addEventListener('keydown', onKey)
-  return { refresh: draw, dispose: () => document.removeEventListener('keydown', onKey) }
+  return { refresh: draw, dispose: () => { offQueue(); document.removeEventListener('keydown', onKey) } }
 }

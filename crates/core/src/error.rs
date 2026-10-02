@@ -20,6 +20,11 @@ pub enum Error {
     /// `empty_recording`, `not_implemented`... (lista em RECORDING_CONTRACT.md).
     #[error("recording ({0}): {1}")]
     Recording(&'static str, String),
+    /// Erros da transcrição (fase 4). Códigos estáveis em TRANSCRIPTION_CONTRACT.md §9: `not_implemented`,
+    /// `runtime_missing`, `models_missing`, `setup_failed`, `download_failed`, `checksum_mismatch`,
+    /// `worker_crashed`, `worker_protocol`, `audio_decode`, `no_audio`, `oom`, `no_raw_data`, `job_failed`...
+    #[error("transcription ({0}): {1}")]
+    Transcription(&'static str, String),
     #[error(transparent)]
     Db(#[from] rusqlite::Error),
     #[error(transparent)]
@@ -38,6 +43,7 @@ impl Error {
             Error::SchemaTooNew { .. } => "schema_too_new",
             Error::Audio(_) => "audio",
             Error::Recording(code, _) => code,
+            Error::Transcription(code, _) => code,
             Error::Db(_) => "database",
             Error::Io(_) => "io",
             Error::Json(_) => "json",
@@ -50,7 +56,7 @@ impl Error {
             Error::NotFound(s) | Error::Ambiguous(s) | Error::Invalid(s) | Error::Conflict(s) | Error::Audio(s) => {
                 s.clone()
             }
-            Error::Recording(_, s) => s.clone(),
+            Error::Recording(_, s) | Error::Transcription(_, s) => s.clone(),
             other => other.to_string(),
         }
     }
@@ -61,6 +67,15 @@ impl Error {
 
     pub fn not_found(msg: impl fmt::Display) -> Self {
         Error::NotFound(msg.to_string())
+    }
+
+    pub fn transcription(code: &'static str, msg: impl fmt::Display) -> Self {
+        Error::Transcription(code, msg.to_string())
+    }
+
+    /// Corpo dos stubs da fase 4: compila, nunca derruba o processo.
+    pub fn not_implemented(what: &str) -> Self {
+        Error::Transcription("not_implemented", what.to_string())
     }
 
     pub fn recording(code: &'static str, msg: impl fmt::Display) -> Self {

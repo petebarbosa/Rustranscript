@@ -1,5 +1,5 @@
 import { lang, t } from './i18n'
-import type { CallSummary, SpeakerInfo } from './api'
+import { SPEAKER_LABEL_ME, SPEAKER_LABEL_PERSON, type CallSummary, type SpeakerInfo } from './api'
 
 export const esc = (s: string) =>
   s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)
@@ -44,12 +44,16 @@ export function callTitle(c: Pick<CallSummary, 'title' | 'started_at'>) {
   return c.title || t('call.untitled', { date: fmtDateShort(c.started_at), time: fmtClock(c.started_at) })
 }
 
-export function speakerName(s: SpeakerInfo | undefined, meName: string | undefined) {
+/** Rótulo sem o nome dado pelo usuário: 'Eu' → nome configurado ou t('speaker.me'); 'Pessoa N' → t('speaker.person'). */
+export function speakerDefault(s: SpeakerInfo | undefined, meName: string | undefined) {
   if (!s) return '?'
-  if (s.name) return s.name
-  if (s.track === 'mic') return meName || t('speaker.me')
-  return s.label
+  if (s.track === 'mic' || s.label === SPEAKER_LABEL_ME) return meName || t('speaker.me')
+  const m = SPEAKER_LABEL_PERSON.exec(s.label)
+  return m ? t('speaker.person', { n: m[1] }) : s.label
 }
+
+/** Nome exibido: o que o usuário deu vence tudo. */
+export const speakerName = (s: SpeakerInfo | undefined, meName: string | undefined) => s?.name || speakerDefault(s, meName)
 
 /** Trecho do FTS (\u0002…\u0003) → HTML com <mark>. */
 export const markSnippet = (s: string) =>
@@ -103,4 +107,12 @@ export function diffWords(a: string, b: string): { before: string; after: string
     else after += ins(y[j++])
   }
   return { before, after }
+}
+
+/** Barra de progresso; `fraction` null = indeterminada (animação). */
+export function barHtml(fraction: number | null, tone = 'bg-violet-400') {
+  const track = 'h-1.5 overflow-hidden rounded-full bg-white/10'
+  if (fraction == null) return `<div class="${track}" role="progressbar"><div class="indet h-full w-1/3 rounded-full ${tone}"></div></div>`
+  const pct = Math.round(Math.min(1, Math.max(0, fraction)) * 100)
+  return `<div class="${track}" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><div class="h-full rounded-full ${tone} transition-[width] duration-700 ease-out" style="width:${pct}%"></div></div>`
 }

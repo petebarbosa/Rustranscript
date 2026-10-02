@@ -81,13 +81,13 @@ fn v1_databases_upgrade_cleanly() {
     }
 
     let app = App::open(&e.data).unwrap();
-    assert_eq!(app.db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), 2);
+    assert_eq!(app.db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), 3);
     let g = app.global_rules().unwrap();
     assert_eq!((g.len(), g[0].pattern.as_str(), g[0].source_edit_id), (1, "gate", None));
 
     let row = app.add_library("Empresa", &e.company).unwrap();
     let lib = app.open_library(row.id).unwrap();
-    assert_eq!(lib.conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), 3);
+    assert_eq!(lib.conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), 4);
     // v3 (fase 3): chamadas que já existiam ficam com a transcrição "done"
     assert_eq!(lib.call_summary(1).unwrap().transcription_state, "done");
     let h = lib.history(Some(1), 10).unwrap();

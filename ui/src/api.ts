@@ -20,6 +20,8 @@ export type TranscriptionState = 'pending' | 'running' | 'done' | 'failed'
 export interface TranscriptInfo {
   id: number; version: number; model: string | null; engine: string | null
   source_file: string | null; created_at: string; is_active: boolean
+  /** tem o bruto da transcrição: só então "separar vozes de novo"/"remontar" são possíveis (importadas: false) */
+  has_raw: boolean
 }
 export interface SpeakerInfo { id: number; track: 'mic' | 'sys'; label: string; name: string | null }
 export interface BlockInfo {
@@ -163,6 +165,69 @@ export interface RecordStartArgs {
   expectedSpeakers?: number | null; language?: string | null
   mic?: StreamChoice; sys?: StreamChoice
 }
+// ---- transcrição (fase 4; ver TRANSCRIPTION_CONTRACT.md)
+export type JobKind = 'full' | 'rediarize' | 'resegment'
+export type JobState = 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
+export type JobStage = 'preparing' | 'loading_model' | 'asr_sys' | 'asr_mic' | 'energy' | 'diarize' | 'assemble' | 'commit'
+/** tudo opcional: ausente = configuração */
+export interface JobOptions {
+  language?: string | null; expected_speakers?: number | null; bleed_filter?: boolean | null
+  bleed_margin_db?: number | null; diarization_threshold?: number | null
+}
+export interface JobInfo {
+  id: number; library_id: number; call_id: number; call_key: string; kind: JobKind; state: JobState
+  options: JobOptions; base_job_id: number | null; attempts: number
+  stage: JobStage | null; progress: number | null
+  error_code: string | null; error_detail: string | null
+  created_at: string; started_at: string | null; finished_at: string | null
+}
+/** 'user' = pausada pelo usuário; 'recording' = há gravação em curso; null = andando */
+export type PauseReason = 'user' | 'recording'
+/** jobs: a rodando primeiro, depois as enfileiradas (por id), depois as últimas 20 terminadas */
+export interface QueueStatus { paused: PauseReason | null; jobs: JobInfo[] }
+export interface RuntimeStatus {
+  state: 'missing' | 'outdated' | 'ready' | 'fake'; runtime_version: number; python: string; uv: string; installed_at: string | null
+}
+export interface ModelStatus {
+  id: 'whisper' | 'segmentation' | 'embedding'; installed: boolean; bytes_total: number; bytes_done: number; local: boolean
+}
+export interface TranscriptionStatus {
+  runtime: RuntimeStatus; models: ModelStatus[]
+  setup: { running: boolean; phase: 'runtime' | 'models' | null }
+  queue: QueueStatus; fake_worker: boolean
+}
+/** evento `transcription-setup`; `phase: 'finished'` encerra (error != null = falhou) */
+export interface SetupEvent {
+  phase: 'runtime' | 'models' | 'finished'
+  step: 'download_uv' | 'install_python' | 'create_venv' | 'sync_packages' | 'verify' | null
+  index: number | null; of: number | null
+  model: string | null; file: string | null; bytes_done: number | null; bytes_total: number | null
+  error: ApiError | null
+}
+/** evento `queue-progress` (fraction = da etapa; null = indeterminado) */
+export interface JobProgress {
+  job_id: number; library_id: number; call_id: number; stage: JobStage
+  fraction: number | null; audio_s: number | null; total_s: number | null
+}
+export interface BleedRemoval {
+  id: number; t_start: number; t_end: number; text: string
+  containment: number | null; margin_db: number | null; reason: 'text_and_energy' | 'energy_short'
+}
+export const TRANSCRIPTION_EVENTS = {
+  setup: 'transcription-setup', queueChanged: 'queue-changed', queueProgress: 'queue-progress',
+} as const
+/** padrões das configurações (strings, como em `app.db.settings`); a UI mostra o padrão quando a chave não existe */
+export const TRANSCRIPTION_DEFAULTS = {
+  transcription_language: 'pt', transcription_auto: '1', transcription_hotwords: '1', transcription_beam_size: '5',
+  transcription_threads: '0', transcription_vad_min_silence_ms: '500', transcription_low_priority: '1',
+  transcription_queue_paused: '0', diarization_threshold: '0.9', diarization_min_cluster_pct: '5',
+  diarization_min_cluster_s: '10', bleed_filter: '1', bleed_margin_db: '15', bleed_containment: '0.6',
+  bleed_min_words: '4', bleed_tolerance_s: '0.75',
+} as const
+/** rótulos canônicos gravados no banco; a UI os traduz ('Eu' → settings.me_name ou t('speaker.me'); 'Pessoa N' → t('speaker.person')) */
+export const SPEAKER_LABEL_ME = 'Eu'
+export const SPEAKER_LABEL_PERSON = /^Pessoa (\d+)$/
+
 /** nomes dos eventos emitidos pelo shell */
 export const REC_EVENTS = {
   levels: 'record-levels', state: 'record-state', finalizeProgress: 'record-finalize-progress',
@@ -284,6 +349,20 @@ export const api = {
   barShow: () => call<void>('bar_show'),
   barHide: () => call<void>('bar_hide'),
   showMainWindow: () => call<void>('show_main_window'),
+  // ---- transcrição
+  transcriptionStatus: () => call<TranscriptionStatus>('transcription_status'),
+  /** instala runtime + modelos que faltam (eventos `transcription-setup`); já rodando → erro `conflict` */
+  transcriptionSetupStart: () => call<void>('transcription_setup_start'),
+  transcriptionSetupCancel: () => call<void>('transcription_setup_cancel'),
+  modelsImportLocal: (model: ModelStatus['id'], path: string) => call<ModelStatus[]>('models_import_local', { model, path }),
+  transcribeEnqueue: (libraryId: number, callId: number, kind: JobKind = 'full', options: JobOptions | null = null) =>
+    call<JobInfo>('transcribe_enqueue', { libraryId, callId, kind, options }),
+  transcribePending: () => call<JobInfo[]>('transcribe_pending'),
+  queueStatus: () => call<QueueStatus>('queue_status'),
+  queueCancel: (jobId: number) => call<void>('queue_cancel', { jobId }),
+  queueRetry: (jobId: number) => call<JobInfo>('queue_retry', { jobId }),
+  queuePause: (paused: boolean) => call<QueueStatus>('queue_pause', { paused }),
+  bleedRemovals: (libraryId: number, transcriptId: number) => call<BleedRemoval[]>('bleed_removals', { libraryId, transcriptId }),
 }
 
 export async function on<T>(event: string, fn: (payload: T) => void): Promise<UnlistenFn> {

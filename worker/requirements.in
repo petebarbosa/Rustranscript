@@ -1,0 +1,6 @@
+# Dependências diretas do worker (versões fixadas; as transitivas ficam nos locks com hash).
+# NÃO usar av 19.x: remove um argumento que o faster-whisper 1.2.1 ainda passa (toda transcrição falharia).
+faster-whisper==1.2.1
+ctranslate2==4.8.2
+sherpa-onnx==1.13.8
+av==18.1.0

@@ -1,8 +1,9 @@
-import { api, type BlockEdit, type BlockInfo, type BlockSuggestion, type CallDetail, type Hit, type HistoryEntry, type Scope, type SpeakerInfo } from '../api'
+import { api, toError, type BleedRemoval, type BlockEdit, type BlockInfo, type BlockSuggestion, type CallDetail, type Hit, type HistoryEntry, type JobInfo, type Scope, type SpeakerInfo } from '../api'
 import { t } from '../i18n'
 import { hooks, libName, meName, store, type View } from '../store'
-import { assignDialog, btnCls, describeError, describeGlossaryError, form, inputCls, renameDialog } from '../dialogs'
-import { callTitle, diffWords, esc, fmtClock, fmtDate, fmtDuration, fmtNumber, fmtTime, fold, h, rx, toast } from '../util'
+import { assignDialog, btnCls, describeError, describeGlossaryError, field, form, inputCls, renameDialog } from '../dialogs'
+import { cancelJob, enqueueCall, isReady, jobError, jobForCall, jobProgress, retryJob, stageText, subscribe as subscribeTx, tx } from '../tx'
+import { barHtml, callTitle, diffWords, esc, fmtClock, fmtDate, fmtDuration, fmtNumber, fmtTime, fold, h, rx, speakerDefault, speakerName, toast } from '../util'
 
 // (rótulo, balão) para quem não é o microfone
 const PALETTE = [
@@ -39,6 +40,11 @@ function sections(d: CallDetail): Section[] {
 
 export async function renderCall(el: HTMLElement, libraryId: number, callId: number, params: URLSearchParams): Promise<View> {
   let d = await api.callDetail(libraryId, callId)
+  /** removidos como eco na versão ativa (vazio se não há versão ou o shell não responde) */
+  let bleed: BleedRemoval[] = []
+  const loadBleed = async () => { bleed = d.transcript_id == null ? [] : await api.bleedRemovals(libraryId, d.transcript_id).catch(() => []) }
+  await loadBleed()
+  const dismissed = new Set<number>()
   let editing = (() => { try { return localStorage.getItem('edit-mode') === '1' } catch { return false } })()
   const timers = new Map<number, ReturnType<typeof setTimeout>>()
   let io: IntersectionObserver | null = null
@@ -50,7 +56,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     if (!order.has(s.id)) order.set(s.id, order.size)
     return PALETTE[order.get(s.id)! % PALETTE.length]
   }
-  const nameOf = (s: SpeakerInfo | undefined) => (s?.name ?? (s?.track === 'mic' ? meName() || t('speaker.me') : s?.label ?? '?'))
+  const nameOf = (s: SpeakerInfo | undefined) => speakerName(s, meName())
 
   function blockHtml(b: BlockInfo, spk: Map<number, SpeakerInfo>, order: Map<number, number>) {
     const s = spk.get(b.speaker_id)
@@ -72,21 +78,64 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
   /** Chamada recém-gravada: sem transcrição (transcript_id null; blocos, falantes e capítulos vêm vazios). */
   const noTranscript = () => d.transcript_id == null
 
-  /** Estado vazio da chamada pendente: o áudio existe, a transcrição chega depois (fase 4). */
+  const kindLabel = (j: JobInfo) => t(`queue.kind.${j.kind}`)
+  const btnSm = 'rounded-lg border border-white/10 bg-ink-800 px-3 py-1.5 text-xs text-zinc-200 hover:border-violet-400/50'
+  const pausedText = () => (tx.queue.paused ? t(`queue.paused_${tx.queue.paused}`) : '')
+
+  /** Estado da chamada sem transcrição: pendente / na fila / transcrevendo (etapa + barra) / falhou (com "tentar de novo"). */
   function pendingHtml() {
-    const st = d.transcription_state
+    const job = jobForCall(libraryId, callId)
+    const k: 'pending' | 'queued' | 'running' | 'failed' = job
+      ? job.state === 'running' ? 'running' : job.state === 'queued' ? 'queued' : 'failed'
+      : d.transcription_state === 'done' ? 'pending' : d.transcription_state
+    const auto = (store.boot.settings.transcription_auto ?? '1') === '1'
     const tracks = [
       d.audio.mic_path && t('record.track_mic'), d.audio.sys_path && t('record.track_sys'),
     ].filter(Boolean) as string[]
-    const tone = st === 'failed' ? 'border-rose-400/30 bg-rose-400/[0.05]' : 'border-white/10 bg-ink-900/60'
-    return `<div id="pending-state" class="mt-4 rounded-2xl border ${tone} p-8 text-center">
-      <p class="text-4xl text-zinc-500">${st === 'running' ? '◔' : st === 'failed' ? '⚠' : '◌'}</p>
-      <h2 class="mt-3 text-lg font-semibold text-white">${esc(t(`transcription.${st}_title`))}</h2>
-      <p class="mx-auto mt-2 max-w-xl text-sm text-zinc-400">${esc(t(`transcription.${st}_body`, { error: d.transcription_error ?? '' }))}</p>
+    const tone = k === 'failed' ? 'border-rose-400/30 bg-rose-400/[0.05]' : 'border-white/10 bg-ink-900/60'
+    const err = k === 'failed' ? (job ? jobError(job) : { title: t('error.job_failed'), detail: d.transcription_error ?? '' }) : null
+    const body = k === 'failed' ? `<p class="mx-auto mt-2 max-w-xl text-sm text-rose-200">${esc(err!.title)}</p>${err!.detail ? `<p class="mx-auto mt-1 max-w-xl break-words font-mono text-xs text-zinc-500">${esc(err!.detail)}</p>` : ''}`
+      : k === 'running' && job ? `<p class="mx-auto mt-2 max-w-xl text-sm text-zinc-300">${esc(stageText(job))}</p><div class="mx-auto mt-3 max-w-sm">${barHtml(jobProgress(job).fraction, 'bg-sky-400')}</div>`
+      : `<p class="mx-auto mt-2 max-w-xl text-sm text-zinc-400">${esc(t(k === 'pending' && !auto ? 'transcription.pending_body_manual' : `transcription.${k}_body`, { error: d.transcription_error ?? '' }))}</p>`
+    const notice = (k === 'queued' && pausedText() ? `<p class="mx-auto mt-3 max-w-xl text-xs text-amber-300">${esc(pausedText())}</p>` : '')
+      + (k !== 'running' && k !== 'failed' && tx.status && !isReady() ? `<p class="mx-auto mt-3 max-w-xl text-xs text-amber-300">${esc(t('transcription.setup_needed'))} <a href="#/settings" class="underline hover:text-amber-100">${esc(t('transcription.open_settings'))}</a></p>` : '')
+    const actions = k === 'pending' && !auto ? `<button type="button" data-tx="enqueue" class="${btnCls.btnPrimary}">${esc(t('transcription.start'))}</button>`
+      : k === 'failed' ? `<button type="button" data-tx="retry" class="${btnCls.btnPrimary}">${esc(t('queue.retry'))}</button>`
+      : (k === 'queued' || k === 'running') && job ? `<button type="button" data-tx="cancel" class="${btnCls.btn}">${esc(t('queue.cancel'))}</button>` : ''
+    return `<div id="pending-state" data-kind="${k}" class="mt-4 rounded-2xl border ${tone} p-8 text-center">
+      <p class="text-4xl text-zinc-500">${k === 'running' ? '◔' : k === 'failed' ? '⚠' : k === 'queued' ? '◷' : '◌'}</p>
+      <h2 class="mt-3 text-lg font-semibold text-white">${esc(t(`transcription.${k}_title`))}</h2>
+      ${body}${notice}
+      ${actions ? `<div class="mt-5">${actions}</div>` : ''}
       <p class="mt-5 text-xs text-zinc-500">${d.audio.deleted_at
         ? esc(t('call.audio_deleted'))
         : tracks.length ? `${esc(t('call.audio_present'))}: ${tracks.map(x => `<span class="ml-1 rounded-full bg-white/5 px-2 py-0.5 text-zinc-300">${esc(x)}</span>`).join('')}` : esc(t('call.audio_none'))}</p>
     </div>`
+  }
+
+  /** Faixa sob o título quando há tarefa desta chamada que já tem versão (separar vozes, remontar, transcrever de novo). */
+  function jobStripHtml() {
+    const j = jobForCall(libraryId, callId)
+    if (noTranscript() || !j || (j.state === 'failed' && dismissed.has(j.id))) return ''
+    if (j.state === 'failed') {
+      const e = jobError(j)
+      return `<div class="flex flex-wrap items-center gap-3 rounded-xl border border-rose-400/25 bg-rose-400/[0.05] px-3 py-2 text-xs text-rose-200">
+        <span class="font-medium">${esc(kindLabel(j))}</span><span class="min-w-0 flex-1">${esc(e.title)}</span>
+        <button type="button" data-tx="retry" class="${btnSm}">${esc(t('queue.retry'))}</button>
+        <button type="button" data-tx="dismiss" aria-label="${esc(t('common.close'))}" class="rounded-lg px-2 text-base leading-none text-rose-300 hover:bg-white/5">×</button></div>`
+    }
+    const running = j.state === 'running'
+    return `<div class="flex flex-wrap items-center gap-3 rounded-xl border border-sky-400/20 bg-sky-400/[0.05] px-3 py-2 text-xs text-zinc-300">
+      <span class="font-medium text-sky-200">${esc(kindLabel(j))}</span>
+      <span class="min-w-0 flex-1 truncate">${esc(running ? stageText(j) : pausedText() || t('queue.state.queued'))}</span>
+      ${running ? `<div class="w-32 shrink-0">${barHtml(jobProgress(j).fraction, 'bg-sky-400')}</div>` : ''}
+      <button type="button" data-tx="cancel" class="${btnSm}">${esc(t('queue.cancel'))}</button></div>`
+  }
+
+  /** Atualiza só a faixa/estado da tarefa (a cada `queue-progress`), sem refazer a página. */
+  function paintJob() {
+    if (noTranscript()) { const p = el.querySelector('#pending-state'); if (p) p.outerHTML = pendingHtml() }
+    else { const s = el.querySelector('#job-strip'); if (s) s.innerHTML = jobStripHtml() }
   }
 
   function draw(keepScroll = false) {
@@ -99,6 +148,9 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     const place = lib?.kind === 'inbox' ? t('nav.unclassified') : [lib?.name, d.client_name ?? t('nav.no_client')].join(' · ')
     const back = lib?.kind === 'inbox' ? '#/unclassified' : d.client_id ? `#/lib/${d.library_id}/client/${d.client_id}` : `#/lib/${d.library_id}`
     const chip = (s: string) => `<span class="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-0.5 text-xs text-zinc-400">${esc(s)}</span>`
+    const pill = 'rounded-full border border-white/10 bg-ink-900 px-2.5 py-0.5 text-xs text-zinc-300 hover:border-violet-400/50 hover:text-white'
+    const pj = pending ? jobForCall(libraryId, callId) : undefined
+    const pk = pj ? (pj.state === 'running' ? 'running' : pj.state === 'queued' ? 'queued' : 'failed') : d.transcription_state === 'done' ? 'pending' : d.transcription_state
     const versions = d.transcripts.length > 1
       ? `<select id="version" class="rounded-full border border-white/10 bg-ink-900 px-2.5 py-0.5 text-xs text-zinc-300">${d.transcripts
           .map(v => `<option value="${v.id}" ${v.id === d.transcript_id ? 'selected' : ''}>${esc(t('call.version', { v: v.version }))}${v.model ? ' · ' + esc(v.model) : ''}</option>`).join('')}</select>`
@@ -120,10 +172,15 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
           ${chip(`${fmtDate(d.started_at)} · ${fmtClock(d.started_at)}`)}
           ${chip(fmtDuration(d.duration_s))}
           ${pending
-            ? `<span class="rounded-full border px-2.5 py-0.5 text-xs ${d.transcription_state === 'failed' ? 'border-rose-400/30 bg-rose-400/10 text-rose-300' : d.transcription_state === 'running' ? 'border-sky-400/30 bg-sky-400/10 text-sky-300' : 'border-amber-400/30 bg-amber-400/10 text-amber-300'}">${esc(t(`transcription.${d.transcription_state === 'done' ? 'pending' : d.transcription_state}`))}</span>`
+            ? `<span class="rounded-full border px-2.5 py-0.5 text-xs ${pk === 'failed' ? 'border-rose-400/30 bg-rose-400/10 text-rose-300' : pk === 'running' ? 'border-sky-400/30 bg-sky-400/10 text-sky-300' : pk === 'queued' ? 'border-violet-400/30 bg-violet-400/10 text-violet-300' : 'border-amber-400/30 bg-amber-400/10 text-amber-300'}">${esc(t(`transcription.${pk}`))}</span>`
             : chip(t('list.words', { n: d.words, count: fmtNumber(d.words) }))}
           ${versions}
+          ${pending ? '' : `<span class="ml-auto flex flex-wrap items-center gap-1.5">
+            <button type="button" id="speakers-btn" class="${pill}">${esc(t('call.speakers'))}</button>
+            ${bleed.length ? `<button type="button" id="bleed-btn" class="${pill}">${esc(t('call.bleed_title', { n: bleed.length }))}</button>` : ''}
+            <button type="button" id="redo-btn" class="${pill}">${esc(t('call.redo'))}</button></span>`}
         </div>
+        <div id="job-strip" class="mt-2 empty:hidden">${jobStripHtml()}</div>
         <div class="mt-3 flex items-center gap-2">
           <div class="relative flex-1" ${pending ? 'hidden' : ''}>
             <input id="q" type="search" autocomplete="off" placeholder="${esc(t('call.search'))}"
@@ -249,6 +306,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
 
   async function reload(keepScroll = true) {
     d = await api.callDetail(libraryId, callId)
+    await loadBleed()
     draw(keepScroll)
     runSearch()
   }
@@ -297,7 +355,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     const spk = speakerById().get(block.speaker_id)
     const others = d.speakers.filter(s => s.id !== block.speaker_id)
     const body = `
-      <label class="block text-sm"><span class="mb-1.5 block text-zinc-400">${esc(t('speaker.rename', { label: spk?.label ?? '' }))}</span>
+      <label class="block text-sm"><span class="mb-1.5 block text-zinc-400">${esc(t('speaker.rename', { label: speakerDefault(spk, meName()) }))}</span>
         <input name="name" maxlength="80" class="${inputCls}" value="${esc(spk?.name ?? '')}" placeholder="${esc(nameOf(spk))}">
         <span class="mt-1 block text-xs text-zinc-600">${esc(t('speaker.rename_hint'))}</span></label>
       ${others.length ? `<label class="block text-sm"><span class="mb-1.5 block text-zinc-400">${esc(t('speaker.reassign', { seq: block.seq }))}</span>
@@ -330,6 +388,81 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
       toast(t('assign.done', { place: target ? libName(target) : '' }))
       location.hash = `#/call/${moved.library_id}/${moved.call_id}`
     } catch (e) { toast(describeError(e), 'err') }
+  }
+
+  // ------------------------------------------------------------ falantes, refazer, eco removido
+  /** Renomeia vários falantes de uma vez; vazio volta ao rótulo original. */
+  async function speakersDialog() {
+    const ordered = [...d.speakers].sort((a, b) => Number(b.track === 'mic') - Number(a.track === 'mic') || a.label.localeCompare(b.label, undefined, { numeric: true }))
+    const rows = ordered.map(s => field(
+      `${speakerDefault(s, meName())} · ${t(s.track === 'mic' ? 'record.track_mic' : 'record.track_sys')}`,
+      `<input name="spk-${s.id}" maxlength="80" class="${inputCls}" value="${esc(s.name ?? '')}" placeholder="${esc(speakerDefault(s, meName()))}">`,
+    )).join('')
+    const r = await form(t('call.speakers_title'), `${rows}<p class="text-xs text-zinc-600">${esc(t('speaker.rename_hint'))}</p>`, t('common.save'), async f => {
+      const fd = new FormData(f)
+      let n = 0
+      for (const s of d.speakers) {
+        const name = String(fd.get(`spk-${s.id}`) ?? '').trim() || null
+        if (name !== (s.name ?? null)) { await api.renameSpeaker(libraryId, s.id, name); n++ }
+      }
+      return n
+    })
+    if (r) { await reload(); toast(t('call.saved')) }
+  }
+
+  /** Refazer: separar vozes (nº de pessoas do outro lado), remontar, remontar sem o filtro de eco, ou transcrever tudo de novo. */
+  async function redoDialog() {
+    const hasRaw = d.transcripts.find(v => v.id === d.transcript_id)?.has_raw ?? false
+    const opt = (value: string, label: string, hint: string, extra = '', off = false) => `<label class="flex items-start gap-3 rounded-xl border border-white/10 bg-ink-950/50 p-3 text-sm ${off ? 'opacity-50' : 'cursor-pointer hover:border-violet-400/40'}">
+      <input type="radio" name="kind" value="${value}" ${off ? 'disabled' : ''} class="mt-1 accent-violet-500">
+      <span class="min-w-0 flex-1"><span class="block font-medium text-zinc-100">${esc(label)}</span><span class="mt-0.5 block text-xs text-zinc-500">${esc(hint)}</span>${extra}</span></label>`
+    const body = `${hasRaw ? '' : `<p class="rounded-xl border border-amber-400/20 bg-amber-400/[0.04] px-3 py-2 text-xs text-amber-200">${esc(t('call.no_raw'))}</p>`}
+      ${opt('rediarize', t('call.rediarize'), t('call.rediarize_hint'),
+        `<span class="mt-2 block text-xs text-zinc-400">${esc(t('call.rediarize_speakers'))}<input type="number" name="speakers" min="1" max="20" step="1" value="${d.expected_speakers ?? ''}" class="${inputCls} mt-1 !w-28"></span>`, !hasRaw)}
+      ${opt('resegment', t('call.resegment'), t('call.resegment_hint'), '', !hasRaw)}
+      ${opt('nobleed', t('call.resegment_nobleed'), t('call.resegment_nobleed_hint'), '', !hasRaw)}
+      ${opt('full', t('call.retranscribe'), t('call.retranscribe_hint'))}`
+    const r = await form(t('call.redo_title'), body, t('call.redo_ok'), async f => {
+      const fd = new FormData(f)
+      const kind = String(fd.get('kind') ?? '')
+      if (!kind) throw { code: 'invalid', detail: t('call.redo_pick') }
+      const n = Number(fd.get('speakers'))
+      try {
+        if (kind === 'rediarize') await api.transcribeEnqueue(libraryId, callId, 'rediarize', n >= 1 ? { expected_speakers: Math.min(20, Math.round(n)) } : null)
+        else if (kind === 'resegment') await api.transcribeEnqueue(libraryId, callId, 'resegment', null)
+        else if (kind === 'nobleed') await api.transcribeEnqueue(libraryId, callId, 'resegment', { bleed_filter: false })
+        else await api.transcribeEnqueue(libraryId, callId, 'full', null)
+      } catch (e) {
+        throw toError(e).code === 'conflict' ? { code: 'conflict', detail: t('queue.already_open') } : e
+      }
+      return true
+    }, f => {
+      const first = f.querySelector<HTMLInputElement>('input[name="kind"]:not([disabled])')
+      if (first) first.checked = true
+      // digitar o nº de pessoas escolhe "separar vozes"
+      f.querySelector('input[name="speakers"]')?.addEventListener('focus', () => { (f.querySelector('input[value="rediarize"]') as HTMLInputElement).checked = true })
+    })
+    if (r) { toast(t('queue.enqueued')); paintJob() }
+  }
+
+  /** Trechos do microfone descartados como eco. Restaurar = remontar sem o filtro (o bruto é preservado). */
+  async function bleedDialog() {
+    const reason = (r: BleedRemoval) => t(`call.bleed_reason.${r.reason}`)
+    const rows = bleed.map(r => `<li class="rounded-xl border border-white/10 bg-ink-950/60 px-3 py-2">
+      <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
+        <span class="font-mono text-zinc-300">${fmtTime(r.t_start)}–${fmtTime(r.t_end)}</span><span>${esc(reason(r))}</span>
+        ${r.containment != null ? `<span>${Math.round(r.containment * 100)}%</span>` : ''}${r.margin_db != null ? `<span>${r.margin_db.toFixed(1)} dB</span>` : ''}</div>
+      <p class="mt-1 text-sm leading-relaxed text-zinc-300">${esc(r.text)}</p></li>`).join('')
+    const hasRaw = d.transcripts.find(v => v.id === d.transcript_id)?.has_raw ?? false
+    const r = await form(t('call.bleed_title', { n: bleed.length }),
+      `<p class="text-xs text-zinc-500">${esc(t('call.bleed_hint'))}</p><ul class="max-h-[50vh] space-y-2 overflow-y-auto">${rows}</ul>${hasRaw ? '' : `<p class="text-xs text-amber-300">${esc(t('call.no_raw'))}</p>`}`,
+      t('call.resegment_nobleed'), async () => {
+        if (!hasRaw) throw { code: 'no_raw_data', detail: '' }
+        try { await api.transcribeEnqueue(libraryId, callId, 'resegment', { bleed_filter: false }) }
+        catch (e) { throw toError(e).code === 'conflict' ? { code: 'conflict', detail: t('queue.already_open') } : e }
+        return true
+      }, f => (f.closest('dialog')!.style.width = 'min(40rem,calc(100vw - 2rem))'), t('common.close'))
+    if (r) { toast(t('queue.enqueued')); paintJob() }
   }
 
   // ------------------------------------------------------------ glossário
@@ -464,6 +597,9 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     $('#history').addEventListener('click', showHistory)
     $('#assign').addEventListener('click', assign)
     $('#apply-glossary').addEventListener('click', applyGlossary)
+    el.querySelector('#speakers-btn')?.addEventListener('click', speakersDialog)
+    el.querySelector('#redo-btn')?.addEventListener('click', redoDialog)
+    el.querySelector('#bleed-btn')?.addEventListener('click', bleedDialog)
     el.querySelector<HTMLSelectElement>('#version')?.addEventListener('change', async e => {
       await api.setActiveTranscript(libraryId, callId, Number((e.target as HTMLSelectElement).value))
       await reload(false)
@@ -530,6 +666,15 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
   }
   const onClick = (e: MouseEvent) => {
     const target = e.target as HTMLElement
+    const act = target.closest<HTMLElement>('[data-tx]')?.dataset.tx
+    if (act) {
+      const job = jobForCall(libraryId, callId)
+      if (act === 'enqueue') void enqueueCall(libraryId, callId)
+      else if (act === 'dismiss' && job) { dismissed.add(job.id); paintJob() }
+      else if (act === 'cancel' && job) void cancelJob(job)
+      else if (act === 'retry') void (job && job.state === 'failed' ? retryJob(job) : enqueueCall(libraryId, callId))
+      return
+    }
     const rev = target.closest('[data-revert]')
     if (rev) { const b = rev.closest<HTMLElement>('[data-block]')!; save(b, () => api.revertBlock(libraryId, blockData(b).id)); return }
     const sb = target.closest('[data-speaker-btn]')
@@ -553,6 +698,15 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
   const flushPending = () => blocks().forEach(b => { if (txt(b) === document.activeElement) commit(b) })
   window.addEventListener('beforeunload', flushPending)
 
+  // fila: a faixa/estado da chamada acompanha; mudança de estado da tarefa desta chamada recarrega (versão nova, falha...)
+  const jobSig = () => { const j = jobForCall(libraryId, callId); return j ? `${j.id}:${j.state}` : '' }
+  let sig = jobSig()
+  const busy = () => !!document.activeElement?.closest?.('[data-text]') || !!document.querySelector('dialog[open]') || panel.contains(document.activeElement)
+  const offs = [
+    subscribeTx('queue', () => { const n = jobSig(); if (n !== sig) { sig = n; if (!busy()) void reload(); else paintJob() } else paintJob() }),
+    subscribeTx('progress', paintJob),
+  ]
+
   draw()
   const target = Number(params.get('b'))
   const q = params.get('q')
@@ -561,8 +715,9 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
 
   return {
     refresh: () => reload(),
-    busy: () => !!document.activeElement?.closest?.('[data-text]') || !!document.querySelector('dialog[open]') || panel.contains(document.activeElement),
+    busy,
     dispose: () => {
+      offs.forEach(f => f())
       flushPending()
       panel.remove()
       io?.disconnect()

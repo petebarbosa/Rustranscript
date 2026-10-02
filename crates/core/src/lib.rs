@@ -16,6 +16,7 @@ pub mod rules;
 pub mod schema;
 pub mod search;
 pub mod text;
+pub mod transcription;
 pub mod transfer;
 
 pub use app::App;

@@ -229,7 +229,7 @@ impl Library {
 
     pub fn transcripts(&self, call_id: i64) -> Result<Vec<TranscriptInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, version, model, engine, source_file, created_at, is_active
+            "SELECT id, version, model, engine, source_file, created_at, is_active, raw_job_id IS NOT NULL
              FROM transcripts WHERE call_id = ?1 ORDER BY version",
         )?;
         let rows = stmt.query_map([call_id], |r| {
@@ -241,6 +241,7 @@ impl Library {
                 source_file: r.get(4)?,
                 created_at: r.get(5)?,
                 is_active: r.get(6)?,
+                has_raw: r.get(7)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

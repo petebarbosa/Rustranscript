@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tauri::{Emitter, Manager, State};
 
 use crate::i18n::Lang;
-use crate::{ipc, recording, shell, shortcut, tray};
+use crate::{ipc, recording, shell, shortcut, transcription, tray};
 
 pub(crate) struct AppState {
     pub(crate) data_dir: PathBuf,
@@ -207,7 +207,8 @@ fn set_setting(handle: tauri::AppHandle, state: State<AppState>, key: String, va
         "record_sys",
         "record_bar_on_start",
     ];
-    if !KEYS.contains(&key.as_str()) {
+    // fase 4: configurações de transcrição/diarização/vazamento (lista em `transcription::keys::ALL`)
+    if !KEYS.contains(&key.as_str()) && !core_lib::transcription::keys::ALL.contains(&key.as_str()) {
         return Err(CmdError { code: "invalid".into(), detail: format!("unknown setting {key}") });
     }
     with_app(&state, |app| app.set_setting(&key, value.as_deref().filter(|v| !v.trim().is_empty())))?;
@@ -460,6 +461,7 @@ pub fn run(data_dir: Option<PathBuf>) {
         .plugin(shortcut::plugin())
         .manage(AppState { data_dir: data_dir.clone(), app: Mutex::new(app) })
         .manage(recording::RecState::new())
+        .manage(transcription::TxState::new())
         .on_window_event(shell::on_window_event)
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -471,6 +473,7 @@ pub fn run(data_dir: Option<PathBuf>) {
                 eprintln!("tray: {e}");
             }
             recording::startup(&handle);
+            transcription::startup(&handle);
             // a janela principal nasce invisível (`tauri.conf.json`): só aparece se a app não foi
             // aberta pela CLI/atalho para gravar (`ipc::spawn_gui`)
             if !shell::started_hidden()
@@ -530,8 +533,22 @@ pub fn run(data_dir: Option<PathBuf>) {
             recording::bar_show,
             recording::bar_hide,
             recording::show_main_window,
+            transcription::transcription_status,
+            transcription::transcription_setup_start,
+            transcription::transcription_setup_cancel,
+            transcription::models_import_local,
+            transcription::transcribe_enqueue,
+            transcription::transcribe_pending,
+            transcription::queue_status,
+            transcription::queue_cancel,
+            transcription::queue_retry,
+            transcription::queue_pause,
+            transcription::bleed_removals,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
-    app.run(|handle, event| shell::on_run_event(handle, &event));
+    app.run(|handle, event| {
+        shell::on_run_event(handle, &event);
+        transcription::on_run_event(handle, &event);
+    });
 }

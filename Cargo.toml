@@ -24,6 +24,15 @@ tempfile = "3"
 libpulse-binding = "2.30"
 libpulse-simple-binding = "2.29"
 
+# transcrição (fase 4): download dos modelos/uv (TLS por rustls, sem cmake), verificação e extração
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
+sha2 = "0.10"
+bzip2 = "0.6"
+tar = "0.4"
+flate2 = "1"
+libc = "0.2"
+num_cpus = "1"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

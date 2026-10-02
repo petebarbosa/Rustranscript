@@ -3,6 +3,7 @@ import { LANGS, lang, setLang, t, type Lang } from '../i18n'
 import { hooks, store, type View } from '../store'
 import { addLibraryDialog, btnCls, confirmDialog, describeError, inputCls, renameDialog } from '../dialogs'
 import { esc, fmtNumber, toast } from '../util'
+import { mountTranscriptionSettings } from './txsettings'
 
 // Trechos do compositor (RECORDING_CONTRACT §10.5, verificados em out/2026). A regra casa pelo título INICIAL da janela.
 const HYPR_CONF = `windowrule = match:title ^(transcricoes-bar)$, float on
@@ -103,7 +104,9 @@ export async function renderSettings(el: HTMLElement): Promise<View> {
       </details></section>`
   }
 
+  let offTx: (() => void) | null = null
   const draw = () => {
+    offTx?.()
     const companies = store.libraries.filter(l => l.kind === 'company')
     el.innerHTML = `<div class="mx-auto max-w-3xl px-6 py-10">
       <h1 class="text-3xl font-semibold tracking-tight text-white">${esc(t('settings.title'))}</h1>
@@ -120,6 +123,8 @@ export async function renderSettings(el: HTMLElement): Promise<View> {
       </section>
 
       ${recSection()}
+
+      <section id="tx-settings" class="mt-8"></section>
 
       <section class="mt-8">
         <div class="flex items-center justify-between">
@@ -163,6 +168,7 @@ transcricoes --help</pre>
       toast(t('call.saved'))
     })
     bindRecord()
+    offTx = mountTranscriptionSettings(el.querySelector<HTMLElement>('#tx-settings')!)
     el.querySelector('#add-lib')!.addEventListener('click', async () => {
       if (await addLibraryDialog()) { await hooks.reloadNav(); draw() }
     })
@@ -220,5 +226,5 @@ transcricoes --help</pre>
   }
 
   draw()
-  return { refresh: draw }
+  return { refresh: draw, dispose: () => offTx?.() }
 }

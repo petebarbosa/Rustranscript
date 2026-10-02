@@ -1,0 +1,489 @@
+#!/usr/bin/env python3
+"""Worker de transcrição (protocolo JSON-lines v1; tipos em crates/core/src/transcription/protocol.rs).
+
+- stdout é SÓ protocolo (uma mensagem JSON por linha). O fd 1 original é duplicado para o protocolo e o fd 1
+  passa a apontar para o stderr, então `print` e bibliotecas nativas nunca corrompem o canal. Logs: stderr.
+- Um pedido por vez. Uma thread lê o stdin (para o `cancel` chegar durante um pedido); EOF no stdin = o pai
+  morreu ou fechou o pipe -> `os._exit(0)` na hora (o ctranslate2 não é interrompível no meio de uma janela).
+- Carga preguiçosa: o `hello` sai antes de importar qualquer biblioteca pesada; o modelo carrega no 1º pedido.
+- `--fake` (ou TRANSCRICOES_FAKE_WORKER): modo determinístico, só biblioteca padrão (regra em
+  TRANSCRICOES_FAKE_DELAY_MS: pausa em ms entre segmentos; `slow` em TRANSCRICOES_FAKE_WORKER = 300).
+"""
+import json
+import math
+import os
+import queue
+import sys
+import threading
+import time
+import traceback
+from importlib import metadata
+
+PROTOCOL = 1
+WORKER_VERSION = "0.2.0"
+REQUESTS = ("transcribe", "diarize", "energy")
+SAMPLE_RATE = 16000
+REQUIRED = object()
+
+_proto = None  # stream do protocolo (fd 1 original, duplicado)
+_proto_lock = threading.Lock()
+
+
+# ---------------------------------------------------------------- saída / log
+
+def attach_protocol_stream():
+    """Reserva o fd 1 original para o protocolo e redireciona o fd 1 para o stderr."""
+    global _proto
+    sys.stdout.flush()
+    _proto = os.fdopen(os.dup(1), "w", buffering=1, encoding="utf-8", newline="\n")
+    os.dup2(2, 1)
+
+
+def send(msg):
+    line = json.dumps(msg, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n"
+    try:
+        with _proto_lock:
+            (_proto or sys.stdout).write(line)
+            (_proto or sys.stdout).flush()
+    except (OSError, ValueError):
+        os._exit(0)  # pipe fechado: o pai já não existe
+
+
+def log(*args):
+    print(*args, file=sys.stderr, flush=True)
+
+
+def send_error(rid, code, detail, fatal=False):
+    send({"type": "error", "id": rid, "code": code, "detail": str(detail)[:500], "fatal": fatal})
+
+
+def version(package):
+    try:
+        return metadata.version(package)
+    except metadata.PackageNotFoundError:
+        return None
+
+
+def hello(fake):
+    return {
+        "type": "hello",
+        "protocol": PROTOCOL,
+        "worker": WORKER_VERSION,
+        "pid": os.getpid(),
+        "python": "%d.%d.%d" % sys.version_info[:3],
+        "faster_whisper": None if fake else version("faster-whisper"),
+        "sherpa_onnx": None if fake else version("sherpa-onnx"),
+        "fake": fake,
+    }
+
+
+# ---------------------------------------------------------------- estado / cancelamento
+
+class State:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.live = set()        # ids de pedidos na fila ou em execução
+        self.cancelled = set()   # ids com `cancel` recebido enquanto vivos
+        self.stopping = False    # `shutdown` recebido: o pedido corrente também termina
+        self.wake = threading.Event()
+
+
+STATE = State()
+
+
+class Ctx:
+    """Contexto de um pedido: checagem de cancelamento e espera interrompível."""
+
+    def __init__(self, rid):
+        self.id = rid
+
+    def cancelled(self):
+        with STATE.lock:
+            return STATE.stopping or self.id in STATE.cancelled
+
+    def pause(self, seconds):
+        if seconds > 0:
+            STATE.wake.wait(seconds)
+            if not self.cancelled():
+                STATE.wake.clear()
+
+
+class BadRequest(Exception):
+    pass
+
+
+class WorkerError(Exception):
+    def __init__(self, code, detail, fatal=False):
+        super().__init__(detail)
+        self.code, self.detail, self.fatal = code, detail, fatal
+
+
+def field(msg, key, kind, default=REQUIRED):
+    """Lê um campo tipado do pedido; ausente/null -> `default` (ou BadRequest se obrigatório)."""
+    v = msg.get(key)
+    if v is None:
+        if default is REQUIRED:
+            raise BadRequest("missing field: %s" % key)
+        return default
+    if kind is float:
+        ok = isinstance(v, (int, float)) and not isinstance(v, bool)
+    elif kind is int:
+        ok = isinstance(v, int) and not isinstance(v, bool)
+    else:
+        ok = isinstance(v, kind)
+    if not ok:
+        raise BadRequest("invalid field: %s" % key)
+    return float(v) if kind is float else v
+
+
+def parse_request(msg):
+    kind = msg["type"]
+    p = {"audio": field(msg, "audio", str)}
+    if kind == "transcribe":
+        p.update(
+            track=field(msg, "track", str), model_dir=field(msg, "model_dir", str),
+            language=field(msg, "language", str, None), hotwords=field(msg, "hotwords", str, None),
+            beam_size=field(msg, "beam_size", int, 5), threads=field(msg, "threads", int, 0),
+            word_timestamps=field(msg, "word_timestamps", bool, False),
+            vad_min_silence_ms=field(msg, "vad_min_silence_ms", int, 500),
+            start_s=field(msg, "start_s", float, 0.0),
+        )
+        if p["beam_size"] < 1 or p["threads"] < 0 or p["start_s"] < 0:
+            raise BadRequest("out of range: beam_size/threads/start_s")
+    elif kind == "diarize":
+        p.update(
+            seg_model=field(msg, "seg_model", str), emb_model=field(msg, "emb_model", str),
+            num_clusters=field(msg, "num_clusters", int, None), threshold=field(msg, "threshold", float, 0.9),
+            threads=field(msg, "threads", int, 0),
+        )
+    else:
+        p["step_ms"] = field(msg, "step_ms", int, 100)
+        if p["step_ms"] < 1:
+            raise BadRequest("out of range: step_ms")
+    return p
+
+
+# ---------------------------------------------------------------- modo falso (só stdlib)
+
+def fake_duration(path):
+    """Duração (s) pelo STREAMINFO do FLAC (20 bits de taxa, 36 de amostras totais); WAV como apoio."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+            if head == b"fLaC":
+                block = f.read(4)  # 1º bloco: STREAMINFO (tipo 0), 34 bytes de dados
+                if len(block) < 4 or block[0] & 0x7F != 0:
+                    raise ValueError("no STREAMINFO")
+                data = f.read(34)
+                packed = int.from_bytes(data[10:18], "big")  # 20 taxa | 3 canais | 5 bps | 36 amostras
+                return (packed & ((1 << 36) - 1)) / (packed >> 44)
+        import wave
+        with wave.open(path, "rb") as w:
+            return w.getnframes() / w.getframerate()
+    except Exception as e:  # arquivo ausente, formato inválido, taxa 0...
+        raise WorkerError("audio_decode", "%s: %s" % (type(e).__name__, e))
+
+
+def fake_delay_s():
+    raw = os.environ.get("TRANSCRICOES_FAKE_DELAY_MS")
+    if raw is None and os.environ.get("TRANSCRICOES_FAKE_WORKER") == "slow":
+        raw = "300"
+    try:
+        return max(0.0, float(raw or 0) / 1000.0)
+    except ValueError:
+        return 0.0
+
+
+def send_cancelled(rid, n):
+    send({"type": "cancelled", "id": rid, "segments": n})
+
+
+def fake_transcribe(ctx, p):
+    dur = fake_duration(p["audio"])
+    rid, start_s = ctx.id, p["start_s"]
+    delay = fake_delay_s()
+    send({"type": "progress", "id": rid, "stage": "loading_model"})
+    send({"type": "progress", "id": rid, "stage": "transcribe", "audio_s": min(start_s, dur), "total_s": dur})
+    prefix = "eu trecho" if p["track"] == "mic" else "fala trecho"
+    n, k = 0, math.ceil(start_s / 5.0)
+    while k * 5 < dur:
+        ctx.pause(delay)
+        if ctx.cancelled():
+            return send_cancelled(rid, n)
+        start, end = k * 5.0, min(k * 5.0 + 4.5, dur)
+        text = "%s %d" % (prefix, k)
+        seg = {"type": "segment", "id": rid, "start": start, "end": end, "text": text}
+        if p["word_timestamps"]:
+            ws = text.split(" ")
+            step = (end - start) / len(ws)
+            seg["words"] = [[start + i * step, start + (i + 1) * step, w] for i, w in enumerate(ws)]
+        send(seg)
+        send({"type": "progress", "id": rid, "stage": "transcribe", "audio_s": end, "total_s": dur})
+        n, k = n + 1, k + 1
+    send({"type": "result", "id": rid, "segments": n, "seconds": 0.0, "language": p["language"] or "pt"})
+
+
+def fake_diarize(ctx, p):
+    dur = fake_duration(p["audio"])
+    rid, delay = ctx.id, fake_delay_s()
+    n_turns = math.ceil(dur / 15.0)
+    nspk = 3 if (p["num_clusters"] or 0) >= 3 else 2
+    send({"type": "progress", "id": rid, "stage": "diarize_segmentation"})
+    turns = []
+    for i in range(n_turns):
+        ctx.pause(delay)
+        if ctx.cancelled():
+            return send_cancelled(rid, 0)
+        start = i * 15.0
+        turns.append({"start": start, "end": min(start + 15.0, dur), "speaker": i % nspk})
+        send({"type": "progress", "id": rid, "stage": "diarize_embedding", "done": i + 1, "total": n_turns})
+    send({"type": "result", "id": rid, "turns": turns, "speakers": len({t["speaker"] for t in turns})})
+
+
+def fake_energy(ctx, p):
+    dur = fake_duration(p["audio"])
+    if ctx.cancelled():
+        return send_cancelled(ctx.id, 0)
+    # sem o tipo da trilha no pedido: o nome do arquivo decide (mic.flac = -25 dB, abaixo do sys em -20 dB)
+    level = -25.0 if "mic" in os.path.basename(p["audio"]).lower() else -20.0
+    n = math.ceil(dur * 1000 / p["step_ms"])
+    send({"type": "result", "id": ctx.id, "step_ms": p["step_ms"], "db": [level] * n})
+
+
+# ---------------------------------------------------------------- modo real
+
+_whisper = {"key": None, "model": None}
+
+
+def looks_like_oom(e):
+    s = str(e).lower()
+    return isinstance(e, MemoryError) or "bad_alloc" in s or "out of memory" in s
+
+
+def decode(path):
+    """Áudio inteiro (FLAC/WAV...) em float32 mono 16 kHz, pelo mesmo decodificador do faster-whisper."""
+    if not os.path.isfile(path):
+        raise WorkerError("audio_decode", "file not found: %s" % os.path.basename(path))
+    from faster_whisper import decode_audio
+    try:
+        return decode_audio(path, sampling_rate=SAMPLE_RATE)
+    except MemoryError:
+        raise
+    except Exception as e:
+        raise WorkerError("audio_decode", "%s: %s" % (type(e).__name__, e))
+
+
+def load_whisper(model_dir, threads):
+    key = (model_dir, threads)
+    if _whisper["key"] == key:
+        return _whisper["model"]
+    if not os.path.isfile(os.path.join(model_dir, "model.bin")):
+        raise WorkerError("model_missing", "whisper model not found: %s" % os.path.basename(model_dir.rstrip("/")))
+    _whisper["key"] = _whisper["model"] = None  # libera o anterior antes de carregar outro
+    from faster_whisper import WhisperModel
+    t0 = time.perf_counter()
+    model = WhisperModel(model_dir, device="cpu", compute_type="int8", cpu_threads=threads, local_files_only=True)
+    log("whisper model loaded in %.1fs" % (time.perf_counter() - t0))
+    _whisper["key"], _whisper["model"] = key, model
+    return model
+
+
+def real_transcribe(ctx, p):
+    rid, t0 = ctx.id, time.perf_counter()
+    send({"type": "progress", "id": rid, "stage": "loading_model"})
+    audio = decode(p["audio"])
+    total = len(audio) / SAMPLE_RATE
+    start_s = p["start_s"]
+    # retomada: o VAD ignora clip_timestamps, então fatiamos o array e somamos start_s aos tempos
+    clip = audio[int(round(start_s * SAMPLE_RATE)):] if start_s > 0 else audio
+    send({"type": "progress", "id": rid, "stage": "transcribe", "audio_s": min(start_s, total), "total_s": total})
+    if len(clip) == 0:
+        send({"type": "result", "id": rid, "segments": 0, "seconds": 0.0, "language": p["language"]})
+        return
+    model = load_whisper(p["model_dir"], p["threads"])
+    if ctx.cancelled():
+        return send_cancelled(rid, 0)
+    segments, info = model.transcribe(
+        clip, language=p["language"], beam_size=p["beam_size"], vad_filter=True,
+        vad_parameters={"min_silence_duration_ms": p["vad_min_silence_ms"]},
+        condition_on_previous_text=False, hotwords=p["hotwords"] or None,
+        word_timestamps=p["word_timestamps"],
+    )
+    n = 0
+    for s in segments:  # gerador: cada janela de ~30 s decodifica ao iterar
+        text = s.text.strip()
+        end = s.end + start_s
+        if text:
+            msg = {"type": "segment", "id": rid, "start": round(s.start + start_s, 3), "end": round(end, 3), "text": text}
+            if s.words:
+                msg["words"] = [[round(w.start + start_s, 3), round(w.end + start_s, 3), w.word.strip()]
+                                for w in s.words if w.word.strip()]
+            send(msg)
+            n += 1
+        send({"type": "progress", "id": rid, "stage": "transcribe", "audio_s": round(min(end, total), 3), "total_s": total})
+        if ctx.cancelled():
+            return send_cancelled(rid, n)
+    send({"type": "result", "id": rid, "segments": n, "seconds": round(time.perf_counter() - t0, 2),
+          "language": info.language})
+
+
+def real_diarize(ctx, p):
+    rid = ctx.id
+    for key in ("seg_model", "emb_model"):
+        if not os.path.isfile(p[key]):
+            raise WorkerError("model_missing", "diarization model not found: %s" % os.path.basename(p[key]))
+    send({"type": "progress", "id": rid, "stage": "diarize_segmentation"})
+    audio = decode(p["audio"])
+    if len(audio) == 0:
+        send({"type": "result", "id": rid, "turns": [], "speakers": 0})
+        return
+    import sherpa_onnx
+    nc = p["num_clusters"] if p["num_clusters"] and p["num_clusters"] > 0 else -1
+    config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
+        segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
+            pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(
+                model=p["seg_model"], window_shift_ratio=0.1),
+            num_threads=max(1, p["threads"])),
+        embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=p["emb_model"], num_threads=max(1, p["threads"])),
+        clustering=sherpa_onnx.FastClusteringConfig(num_clusters=nc, threshold=p["threshold"]),
+        min_duration_on=0.3, min_duration_off=0.5)
+    if not config.validate():
+        raise WorkerError("model_missing", "invalid diarization config (check model files)")
+    sd = sherpa_onnx.OfflineSpeakerDiarization(config)
+    state = {"last": 0.0, "prev_done": 0, "stage": "diarize_segmentation", "aborted": False}
+
+    def on_progress(done, total):
+        if ctx.cancelled():
+            state["aborted"] = True
+            return 1  # não-zero aborta o processamento
+        if done < state["prev_done"]:  # o contador recomeça na fase de embeddings
+            state["stage"] = "diarize_embedding"
+        state["prev_done"] = done
+        now = time.monotonic()
+        if now - state["last"] >= 0.2 or done >= total:
+            state["last"] = now
+            send({"type": "progress", "id": rid, "stage": state["stage"], "done": int(done), "total": int(total)})
+        return 0
+
+    result = sd.process(audio, callback=on_progress)
+    if state["aborted"] or ctx.cancelled():
+        return send_cancelled(rid, 0)
+    turns = [{"start": round(r.start, 3), "end": round(r.end, 3), "speaker": int(r.speaker)}
+             for r in result.sort_by_start_time()]
+    send({"type": "result", "id": rid, "turns": turns, "speakers": len({t["speaker"] for t in turns})})
+
+
+def real_energy(ctx, p):
+    import numpy as np
+    audio = decode(p["audio"])
+    if ctx.cancelled():
+        return send_cancelled(ctx.id, 0)
+    step = SAMPLE_RATE * p["step_ms"] // 1000 or 1
+    full = len(audio) // step
+    ms = np.empty(0, dtype=np.float64)
+    if full:
+        blocks = audio[: full * step].reshape(full, step)
+        ms = np.einsum("ij,ij->i", blocks, blocks, dtype=np.float64) / step
+    if len(audio) > full * step:  # último passo parcial: RMS só das amostras que existem
+        tail = audio[full * step:].astype(np.float64)
+        ms = np.append(ms, float(np.dot(tail, tail)) / len(tail))
+    db = np.round(10.0 * np.log10(np.maximum(ms, 1e-12)), 1)  # dBFS (RMS); piso -120
+    send({"type": "result", "id": ctx.id, "step_ms": p["step_ms"], "db": db.tolist()})
+
+
+HANDLERS = {
+    False: {"transcribe": real_transcribe, "diarize": real_diarize, "energy": real_energy},
+    True: {"transcribe": fake_transcribe, "diarize": fake_diarize, "energy": fake_energy},
+}
+
+
+# ---------------------------------------------------------------- laço principal
+
+def run_request(msg, fake):
+    rid = msg["id"]
+    fatal_exit = False
+    try:
+        HANDLERS[fake][msg["type"]](Ctx(rid), parse_request(msg))
+    except BadRequest as e:
+        send_error(rid, "bad_request", e)
+    except WorkerError as e:
+        send_error(rid, e.code, e.detail, e.fatal)
+        fatal_exit = e.fatal
+    except Exception as e:
+        log(traceback.format_exc())
+        if looks_like_oom(e):
+            send_error(rid, "oom", "%s: %s" % (type(e).__name__, e), fatal=True)
+            fatal_exit = True
+        else:
+            send_error(rid, "exception", "%s: %s" % (type(e).__name__, e))
+    finally:
+        with STATE.lock:
+            STATE.live.discard(rid)
+            STATE.cancelled.discard(rid)
+    return not fatal_exit
+
+
+def reader(jobs):
+    """Thread leitora do stdin: enfileira pedidos e aplica `cancel`/`shutdown` na hora."""
+    stdin = sys.stdin.buffer
+    while True:
+        try:
+            raw = stdin.readline()
+        except (OSError, ValueError):
+            raw = b""
+        if not raw:
+            break  # EOF: sem pai não há o que fazer
+        if not raw.strip():
+            continue
+        try:
+            msg = json.loads(raw.decode("utf-8"))
+            if not isinstance(msg, dict):
+                raise ValueError("not an object")
+        except ValueError as e:  # inclui UnicodeDecodeError
+            send_error(None, "bad_request", "invalid JSON line: %s" % e)
+            continue
+        kind, rid = msg.get("type"), msg.get("id")
+        if kind == "cancel":
+            with STATE.lock:
+                if rid in STATE.live:  # cancel de pedido já terminado é ignorado
+                    STATE.cancelled.add(rid)
+            STATE.wake.set()
+        elif kind == "shutdown":
+            with STATE.lock:
+                STATE.stopping = True
+            STATE.wake.set()
+            jobs.put(msg)
+        elif kind in REQUESTS:
+            if not isinstance(rid, str) or not rid:
+                send_error(None, "bad_request", "missing or invalid id for %s" % kind)
+                continue
+            with STATE.lock:
+                STATE.live.add(rid)
+            jobs.put(msg)
+        else:
+            send_error(rid if isinstance(rid, str) else None, "bad_request", "unknown type: %r" % (kind,))
+    os._exit(0)
+
+
+def main(argv):
+    fake = "--fake" in argv or bool(os.environ.get("TRANSCRICOES_FAKE_WORKER"))
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")  # sem rede: modelos sempre locais
+    attach_protocol_stream()
+    send(hello(fake))
+    jobs = queue.Queue()
+    threading.Thread(target=reader, args=(jobs,), daemon=True).start()
+    code = 0
+    while True:
+        msg = jobs.get()
+        if msg["type"] == "shutdown":
+            send({"type": "bye"})
+            break
+        if not run_request(msg, fake):
+            code = 1  # erro fatal já informado: o pai reinicia o worker
+            break
+    sys.stderr.flush()
+    os._exit(code)  # a thread leitora (daemon) está bloqueada no stdin; evita travar no encerramento
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

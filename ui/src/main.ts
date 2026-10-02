@@ -2,7 +2,8 @@ import './styles.css'
 import { api, on, inTauri, openExternal, isBarWindow, REC_EVENTS, type FinalizeDone } from './api'
 import { hooks, store, type View } from './store'
 import { resolveLang, setLang, t } from './i18n'
-import { esc, debounce, fmtNumber, fmtTime, toast } from './util'
+import { esc, debounce, fmtNumber, fmtTime, toast, toastLink } from './util'
+import { isReady, openJobs, startTx, subscribe as subscribeTx, tx } from './tx'
 import { elapsedNow, hub, isRecording, startHub, subscribe } from './rec'
 import { finalizeToast, initRecovery } from './recovery'
 import { addLibraryDialog, addClientDialog } from './dialogs'
@@ -13,6 +14,7 @@ import { renderSettings } from './views/settings'
 import { renderImport } from './views/import'
 import { renderGlossary } from './views/glossary'
 import { renderRecord } from './views/record'
+import { renderQueue } from './views/queue'
 import { renderBar } from './views/bar'
 
 let view: View = {}
@@ -49,6 +51,7 @@ function shell() {
       </div>
       <nav id="nav" class="mt-4 flex-1 space-y-0.5 overflow-y-auto px-2 pb-4 text-sm"></nav>
       <div class="space-y-0.5 border-t border-white/10 p-2 text-sm">
+        <a href="#/queue" id="queue-link" data-route="queue" class="nav-item flex items-center justify-between gap-2 rounded-lg px-3 py-1.5 text-zinc-400 hover:bg-white/5 hover:text-zinc-100"></a>
         <a href="#/import" data-route="import" class="nav-item flex items-center gap-2 rounded-lg px-3 py-1.5 text-zinc-400 hover:bg-white/5 hover:text-zinc-100">⇪ ${esc(t('nav.import'))}</a>
         <a href="#/glossary" data-route="glossary" class="nav-item flex items-center gap-2 rounded-lg px-3 py-1.5 text-zinc-400 hover:bg-white/5 hover:text-zinc-100"><span class="w-4 text-center text-xs font-semibold">Aa</span> ${esc(t('nav.glossary'))}</a>
         <a href="#/settings" data-route="settings" class="nav-item flex items-center gap-2 rounded-lg px-3 py-1.5 text-zinc-400 hover:bg-white/5 hover:text-zinc-100">⚙ ${esc(t('nav.settings'))}</a>
@@ -90,6 +93,19 @@ function paintRecLink() {
     ? `<span class="flex items-center gap-2">${dot}${esc(t('record.recording'))}</span><span id="rec-clock" class="font-mono text-sm tabular-nums text-rose-100">${fmtTime(elapsedNow())}</span>`
     : `<span class="flex items-center gap-2">${dot}${esc(t('nav.record'))}</span>${fin ? `<span class="rounded-full bg-amber-400/15 px-2 py-0.5 text-[11px] font-medium text-amber-200">${esc(t('record.finalizing'))}</span>` : ''}`
   a.title = rec ? t('record.recording') : ''
+}
+
+/** Entrada "Fila de transcrição": contador de tarefas abertas, ponto pulsando se há uma rodando, aviso se pausada ou sem instalação. */
+function paintQueueLink() {
+  const a = document.getElementById('queue-link')
+  if (!a) return
+  const open = openJobs()
+  const running = open.some(j => j.state === 'running')
+  const paused = tx.queue.paused
+  const blocked = open.length > 0 && !!tx.status && !isReady()
+  const tag = (txt: string, cls: string) => `<span class="rounded-full px-2 py-0.5 text-[11px] font-medium ${cls}">${esc(txt)}</span>`
+  a.innerHTML = `<span class="flex min-w-0 items-center gap-2"><span class="w-4 text-center">${running ? '<span class="inline-block h-2 w-2 animate-pulse rounded-full bg-sky-400"></span>' : '☰'}</span><span class="truncate">${esc(t('nav.queue'))}</span></span>
+    <span class="flex shrink-0 items-center gap-1.5">${blocked ? tag(t('queue.badge_setup'), 'bg-amber-400/15 text-amber-200') : paused ? tag(t('queue.badge_paused'), 'bg-amber-400/15 text-amber-200') : ''}${open.length ? `<span class="text-xs tabular-nums text-zinc-500">${fmtNumber(open.length)}</span>` : ''}</span>`
 }
 
 function navLink(href: string, label: string, count: number | null, indent = false) {
@@ -154,6 +170,7 @@ async function route() {
     else if (parts[0] === 'glossary') view = await renderGlossary(el, params)
     else if (parts[0] === 'import') view = await renderImport(el)
     else if (parts[0] === 'record') view = await renderRecord(el)
+    else if (parts[0] === 'queue') view = await renderQueue(el)
     else if (parts[0] === 'unclassified') view = await renderList(el, { kind: 'unclassified' })
     else if (parts[0] === 'lib' && parts[2] === 'client') view = await renderList(el, { kind: 'client', libraryId: Number(parts[1]), clientId: Number(parts[3]) })
     else if (parts[0] === 'lib' && parts[2] === 'unassigned') view = await renderList(el, { kind: 'lib-unassigned', libraryId: Number(parts[1]) })
@@ -191,8 +208,20 @@ async function main() {
   paintRecLink()
   subscribe('state', paintRecLink)
   setInterval(() => { const c = document.getElementById('rec-clock'); if (c && isRecording()) c.textContent = fmtTime(elapsedNow()) }, 500)
+  // transcrição: fila e instalação compartilhadas; a entrada da barra lateral acompanha
+  await startTx()
+  paintQueueLink()
+  subscribeTx('queue', paintQueueLink)
+  subscribeTx('status', paintQueueLink)
   await route()
-  await on('data-changed', () => onExternalChange())
+  await on<{ event?: string; library_id?: number; call_id?: number }>('data-changed', e => {
+    // versão nova criada pela fila: aviso com atalho (a tela da própria chamada já se atualiza sozinha)
+    if (e?.event === 'transcribed' && e.library_id != null && e.call_id != null) {
+      const href = `#/call/${e.library_id}/${e.call_id}`
+      if (location.hash.split('?')[0] !== href) toastLink(t('transcription.done_toast'), href, t('transcription.open_call'))
+    }
+    void onExternalChange()
+  })
   await on<FinalizeDone>(REC_EVENTS.finalizeDone, finalizeToast)
   await initRecovery()
 }

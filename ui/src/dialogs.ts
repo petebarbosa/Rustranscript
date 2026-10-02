@@ -14,7 +14,7 @@ export const btnCls = { btn, btnPrimary }
  * Abre um formulário no <dialog>. `submit` devolve o resultado (fecha) ou lança erro
  * (mostrado no rodapé, o diálogo fica aberto). Esc/Cancelar resolve `null`.
  */
-export function form<T>(title: string, body: string, okLabel: string, submit: (f: HTMLFormElement) => Promise<T>, setup?: (f: HTMLFormElement) => void): Promise<T | null> {
+export function form<T>(title: string, body: string, okLabel: string, submit: (f: HTMLFormElement) => Promise<T>, setup?: (f: HTMLFormElement) => void, cancelLabel?: string): Promise<T | null> {
   const d = modal()
   d.style.width = ''
   d.innerHTML = `<form method="dialog" class="p-6">
@@ -22,7 +22,7 @@ export function form<T>(title: string, body: string, okLabel: string, submit: (f
     <div class="mt-4 space-y-4">${body}</div>
     <p data-err class="mt-3 min-h-5 text-sm text-rose-300"></p>
     <div class="mt-2 flex justify-end gap-2">
-      <button type="button" value="cancel" data-cancel class="${btn}">${esc(t('common.cancel'))}</button>
+      <button type="button" value="cancel" data-cancel class="${btn}">${esc(cancelLabel ?? t('common.cancel'))}</button>
       <button type="submit" class="${btnPrimary}">${esc(okLabel)}</button>
     </div></form>`
   const f = d.querySelector('form')!
@@ -61,12 +61,12 @@ export function describeGlossaryError(x: unknown, ctx = '') {
   return describeError(x)
 }
 
-export async function confirmDialog(title: string, message: string, okLabel: string): Promise<boolean> {
-  const r = await form(title, `<p class="text-sm text-zinc-400">${esc(message)}</p>`, okLabel, async () => true)
+export async function confirmDialog(title: string, message: string, okLabel: string, cancelLabel?: string): Promise<boolean> {
+  const r = await form(title, `<p class="text-sm text-zinc-400">${esc(message)}</p>`, okLabel, async () => true, undefined, cancelLabel)
   return r === true
 }
 
-const field = (label: string, input: string, hint = '') =>
+export const field = (label: string, input: string, hint = '') =>
   `<label class="block text-sm"><span class="mb-1.5 block text-zinc-400">${esc(label)}</span>${input}${hint ? `<span class="mt-1 block text-xs text-zinc-600">${hint}</span>` : ''}</label>`
 
 export function addLibraryDialog() {

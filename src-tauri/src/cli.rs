@@ -8,12 +8,16 @@ use core_lib::import::{self, ImportOptions};
 use core_lib::recording::{self as core_rec, Meta, StartRequest};
 use core_lib::model::{ClientInfo, Rule, RuleKind};
 use core_lib::rules::{ImportScope, RuleInput};
+use core_lib::transcription::params::JobOptions;
+use core_lib::transcription::queue::{self, JobKind, JobState, PauseReason};
+use core_lib::transcription::{keys, models, runtime};
 use core_lib::{App, ClientFilter, Error, Library, Origin, glossary, paths, search, transfer};
 use recorder::StreamChoice;
 use serde_json::{Value, json};
 
 use crate::i18n::{self, Lang};
 use crate::ipc::{self, Request};
+use crate::transcription;
 
 #[derive(Parser)]
 #[command(name = "transcricoes", version, about = "Gravação e transcrição de reuniões, local")]
@@ -144,6 +148,65 @@ enum Cmd {
         #[command(subcommand)]
         what: BarCmd,
     },
+    /// Transcreve uma chamada: cria a tarefa na fila e garante a app de pé (ela faz o trabalho)
+    Transcribe(TranscribeArgs),
+    /// Fila de transcrição (padrão: `list`)
+    Queue {
+        #[command(subcommand)]
+        what: Option<QueueCmd>,
+    },
+    /// Ambiente de transcrição (Python isolado + modelos), instalado dentro do diretório de dados
+    Setup {
+        #[command(subcommand)]
+        what: SetupCmd,
+    },
+}
+
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct TranscribeArgs {
+    /// Chave (call_AAAA-MM-DD_HH-MM-SS), nome do arquivo antigo ou <biblioteca>:<id>
+    #[arg(required_unless_present = "pending")]
+    call: Option<String>,
+    /// Enfileira todas as chamadas pendentes (sem tarefa aberta)
+    #[arg(long, conflicts_with_all = ["call", "kind", "language", "expected_speakers", "no_bleed_filter"])]
+    pending: bool,
+    /// full: tudo de novo; rediarize: só separa as vozes de novo; resegment: só remonta o texto (sem rodar o modelo)
+    #[arg(long, value_parser = ["full", "rediarize", "resegment"])]
+    kind: Option<String>,
+    /// Idioma falado: auto, pt, en ou es (padrão: o da chamada ou da configuração)
+    #[arg(long)]
+    language: Option<String>,
+    /// Quantas pessoas do outro lado (melhora a separação de vozes)
+    #[arg(long = "speakers")]
+    expected_speakers: Option<i64>,
+    /// Não remove o eco do outro lado captado pelo microfone
+    #[arg(long)]
+    no_bleed_filter: bool,
+    /// Só mostra o que seria enfileirado
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Subcommand)]
+enum QueueCmd {
+    /// Tarefas rodando, enfileiradas e as últimas terminadas
+    List,
+    /// Pausa a fila (a tarefa em curso para e volta à fila)
+    Pause,
+    /// Retoma a fila
+    Resume,
+    /// Cancela uma tarefa enfileirada (a em andamento só pela janela do app)
+    Cancel { id: i64 },
+    /// Tenta de novo uma tarefa que falhou ou foi cancelada
+    Retry { id: i64 },
+}
+
+#[derive(Subcommand)]
+enum SetupCmd {
+    /// Estado do ambiente e dos modelos
+    Status,
+    /// Instala o ambiente e baixa os modelos que faltam (progresso no stderr; não precisa da app)
+    Install,
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
@@ -561,6 +624,145 @@ fn exec_bar(_app: &App, what: BarCmd, lang: Lang, json_out: bool, sock: &std::pa
     Ok(Output::Text(format!("{}\n", i18n::msg(lang, key))))
 }
 
+// ------------------------------------------------------------------ transcrição (fase 4)
+//
+// A CLI só grava em `app.db`: quem transcreve é a thread da fila da app, que descobre as tarefas por polling.
+// Por isso `transcribe`/`queue retry` garantem a app de pé (sobe escondida) DEPOIS de gravar a tarefa; se ela não
+// subir, a tarefa fica na fila e um aviso vai para o stderr (o comando não falha).
+
+fn ensure_gui(app: &App, lang: Lang, sock: &std::path::Path) {
+    if ipc::ensure_running_on(sock, &app.data_dir, ipc::START_WAIT).is_err() {
+        eprintln!("warning: {}", i18n::msg(lang, "gui_not_started"));
+    }
+}
+
+fn parse_job_kind(kind: Option<&str>) -> core_lib::Result<JobKind> {
+    match kind {
+        None | Some("full") => Ok(JobKind::Full),
+        Some("rediarize") => Ok(JobKind::Rediarize),
+        Some("resegment") => Ok(JobKind::Resegment),
+        Some(other) => Err(Error::invalid(format!("unknown kind {other}"))),
+    }
+}
+
+fn job_options(a: &TranscribeArgs) -> core_lib::Result<JobOptions> {
+    let language = match &a.language {
+        Some(l) => Some(core_rec::language_code(l).ok_or_else(|| Error::invalid("language must be auto, pt, en or es"))?.to_string()),
+        None => None,
+    };
+    if a.expected_speakers.is_some_and(|n| n < 1) {
+        return Err(Error::invalid("speakers must be 1 or more"));
+    }
+    Ok(JobOptions { language, expected_speakers: a.expected_speakers, bleed_filter: a.no_bleed_filter.then_some(false), ..Default::default() })
+}
+
+/// `transcribe <chamada>` → `JobInfo`; `transcribe --pending` → `JobInfo[]`. `--dry-run` não cria nada.
+fn exec_transcribe(app: &App, a: TranscribeArgs, lang: Lang, sock: &std::path::Path) -> core_lib::Result<Output> {
+    let dry = |result: Value| Ok(Output::Json(json!({"dry_run": true, "message": i18n::msg(lang, "dry_run"), "result": result}), None));
+    if a.pending {
+        if a.dry_run {
+            let mut found = Vec::new();
+            for row in app.library_rows()? {
+                if !row.is_inbox() && !row.root.join(core_lib::library::DB_FILE).is_file() {
+                    continue;
+                }
+                for c in Library::open(row)?.calls(ClientFilter::Any)? {
+                    if c.transcription_state == core_lib::model::TRANSCRIPTION_PENDING && c.has_audio {
+                        found.push(json!({"library_id": c.library_id, "call_id": c.id, "call_key": c.key}));
+                    }
+                }
+            }
+            return dry(Value::Array(found));
+        }
+        let jobs = queue::enqueue_pending(app)?;
+        if !jobs.is_empty() {
+            ensure_gui(app, lang, sock);
+        }
+        let changed = (!jobs.is_empty()).then(|| json!({"event": "changed"}));
+        return Ok(Output::Json(to_json(jobs)?, changed));
+    }
+    let (library_id, call_id) = app.find_call(a.call.as_deref().unwrap_or_default())?;
+    let kind = parse_job_kind(a.kind.as_deref())?;
+    let options = job_options(&a)?;
+    if a.dry_run {
+        let key = app.open_library(library_id)?.call_summary(call_id)?.key;
+        return dry(json!({"library_id": library_id, "call_id": call_id, "call_key": key, "kind": kind, "options": options}));
+    }
+    let job = queue::enqueue(app, library_id, call_id, kind, &options)?;
+    ensure_gui(app, lang, sock);
+    Ok(Output::Json(to_json(job)?, changed(library_id, Some(call_id))))
+}
+
+/// A CLI só sabe da pausa do usuário (a pausa por gravação é da app).
+fn cli_pause(app: &App) -> Option<PauseReason> {
+    (app.setting(keys::QUEUE_PAUSED).ok().flatten().as_deref() == Some("1")).then_some(PauseReason::User)
+}
+
+/// `queue [list]` lê o banco; `pause`/`resume`/`cancel` gravam e a app aplica no polling. `cancel` só alcança
+/// tarefas enfileiradas: a em andamento é da thread da app (erro `conflict` com a dica).
+fn exec_queue(app: &App, what: QueueCmd, lang: Lang, sock: &std::path::Path) -> core_lib::Result<Output> {
+    const RECENT: usize = 20;
+    let notify = || Some(json!({"event": "changed"}));
+    match what {
+        QueueCmd::List => Ok(Output::Json(to_json(queue::status(app, cli_pause(app), RECENT)?)?, None)),
+        QueueCmd::Pause | QueueCmd::Resume => {
+            let paused = matches!(what, QueueCmd::Pause);
+            app.set_setting(keys::QUEUE_PAUSED, Some(if paused { "1" } else { "0" }))?;
+            Ok(Output::Json(to_json(queue::status(app, cli_pause(app), RECENT)?)?, notify()))
+        }
+        QueueCmd::Cancel { id } => {
+            match queue::get(app, id)?.state {
+                JobState::Queued => queue::mark_cancelled(app, id)?,
+                JobState::Running => return Err(Error::Conflict(i18n::msg(lang, "queue_cancel_running").into())),
+                _ => return Err(Error::Conflict(format!("job {id} already finished"))),
+            }
+            Ok(Output::Json(to_json(queue::get(app, id)?)?, notify()))
+        }
+        QueueCmd::Retry { id } => {
+            let job = queue::retry(app, id)?;
+            ensure_gui(app, lang, sock);
+            Ok(Output::Json(to_json(job)?, notify()))
+        }
+    }
+}
+
+/// `setup status`: o JSON de `transcription_status` sem a fila. `setup install`: instala no próprio processo.
+fn exec_setup(app: &App, what: SetupCmd, lang: Lang) -> core_lib::Result<Output> {
+    if matches!(what, SetupCmd::Install) {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        if !matches!(transcription::runtime_status(&app.data_dir)?.state.as_str(), "ready" | "fake") {
+            let step = i18n::msg(lang, "setup_runtime");
+            runtime::ensure(&app.data_dir, &mut |p| eprintln!("{step} ({}/{}): {}", p.index, p.of, p.step), &cancel)?;
+        }
+        let step = i18n::msg(lang, "setup_model");
+        let mut last: (String, u64) = (String::new(), u64::MAX);
+        models::ensure(
+            &app.data_dir,
+            &[],
+            &mut |p| {
+                // uma linha por arquivo e a cada 10 %
+                let pct = p.bytes_done * 100 / p.bytes_total.max(1);
+                if (last.0.as_str(), last.1 / 10) != (p.file.as_str(), pct / 10) {
+                    eprintln!("{step} {}/{}: {pct}%", p.model, p.file);
+                    last = (p.file.clone(), pct);
+                }
+            },
+            &cancel,
+        )?;
+        eprintln!("{}", i18n::msg(lang, "setup_done"));
+    }
+    let fake = transcription::fake_env().is_some();
+    Ok(Output::Json(
+        json!({
+            "runtime": transcription::runtime_status(&app.data_dir)?,
+            "models": models::status(&app.data_dir)?,
+            "setup": {"running": false, "phase": null},
+            "fake_worker": fake,
+        }),
+        None,
+    ))
+}
+
 fn find_call(app: &App, reference: &str) -> core_lib::Result<(Library, i64)> {
     let (lib, id) = app.find_call(reference)?;
     Ok((app.open_library(lib)?, id))
@@ -770,6 +972,9 @@ fn exec(app: &App, cmd: Cmd, lang: Lang, json_out: bool) -> core_lib::Result<Out
         Cmd::Record { what } => exec_record(app, what, lang, json_out, &paths::socket_path(&app.data_dir)),
         Cmd::Status => exec_status(app, lang, json_out, &paths::socket_path(&app.data_dir)),
         Cmd::Bar { what } => exec_bar(app, what, lang, json_out, &paths::socket_path(&app.data_dir)),
+        Cmd::Transcribe(a) => exec_transcribe(app, a, lang, &paths::socket_path(&app.data_dir)),
+        Cmd::Queue { what } => exec_queue(app, what.unwrap_or(QueueCmd::List), lang, &paths::socket_path(&app.data_dir)),
+        Cmd::Setup { what } => exec_setup(app, what, lang),
         Cmd::Reclaimable => {
             let files = import::reclaimable(app)?;
             let total: u64 = files.iter().map(|f| f.size).sum();
@@ -1129,6 +1334,86 @@ mod tests {
         // stop e bar exigem a app
         assert!(exec_record(&app, RecordCmd::Stop, Lang::EnUs, false, &sock).is_err_and(|e| e.code() == "not_running"));
         assert!(exec_bar(&app, BarCmd::Show, Lang::EnUs, false, &sock).is_err_and(|e| e.code() == "not_running"));
+    }
+
+    #[test]
+    fn transcription_commands_parse() {
+        let p = |args: &[&str]| Cli::try_parse_from(std::iter::once("transcricoes").chain(args.iter().copied())).map(|c| c.cmd);
+        let Ok(Cmd::Transcribe(a)) = p(&["transcribe", "call_2026-10-01_08-21-52", "--kind", "rediarize", "--language", "pt-BR", "--speakers", "2", "--no-bleed-filter"]) else {
+            panic!("transcribe")
+        };
+        assert_eq!((a.call.as_deref(), a.kind.as_deref(), a.expected_speakers, a.no_bleed_filter, a.pending), (Some("call_2026-10-01_08-21-52"), Some("rediarize"), Some(2), true, false));
+        let opts = job_options(&a).unwrap();
+        assert_eq!((opts.language.as_deref(), opts.expected_speakers, opts.bleed_filter), (Some("pt"), Some(2), Some(false)));
+        assert_eq!(parse_job_kind(a.kind.as_deref()).unwrap(), JobKind::Rediarize);
+        assert!(matches!(p(&["transcribe", "--pending"]), Ok(Cmd::Transcribe(a)) if a.pending && a.call.is_none()));
+        assert!(p(&["transcribe"]).is_err(), "sem chamada nem --pending");
+        assert!(p(&["transcribe", "--pending", "call_x"]).is_err());
+        assert!(p(&["transcribe", "--pending", "--kind", "full"]).is_err());
+        assert!(p(&["transcribe", "call_x", "--kind", "tudo"]).is_err());
+        assert!(job_options(&TranscribeArgs { language: Some("fr".into()), ..Default::default() }).is_err_and(|e| e.code() == "invalid"));
+        assert!(job_options(&TranscribeArgs { expected_speakers: Some(0), ..Default::default() }).is_err_and(|e| e.code() == "invalid"));
+        assert_eq!(job_options(&TranscribeArgs { language: Some("auto".into()), ..Default::default() }).unwrap().language.as_deref(), Some("auto"));
+        assert!(matches!(p(&["queue"]), Ok(Cmd::Queue { what: None })));
+        assert!(matches!(p(&["queue", "list"]), Ok(Cmd::Queue { what: Some(QueueCmd::List) })));
+        assert!(matches!(p(&["queue", "pause"]), Ok(Cmd::Queue { what: Some(QueueCmd::Pause) })));
+        assert!(matches!(p(&["queue", "resume"]), Ok(Cmd::Queue { what: Some(QueueCmd::Resume) })));
+        assert!(matches!(p(&["queue", "cancel", "4"]), Ok(Cmd::Queue { what: Some(QueueCmd::Cancel { id: 4 }) })));
+        assert!(matches!(p(&["queue", "retry", "4"]), Ok(Cmd::Queue { what: Some(QueueCmd::Retry { id: 4 }) })));
+        assert!(p(&["queue", "cancel"]).is_err());
+        assert!(matches!(p(&["setup", "status"]), Ok(Cmd::Setup { what: SetupCmd::Status })));
+        assert!(matches!(p(&["setup", "install"]), Ok(Cmd::Setup { what: SetupCmd::Install })));
+        assert!(p(&["setup"]).is_err());
+    }
+
+    /// Caminhos que não dependem do estado do núcleo em construção: nada aqui sobe a app nem toca no socket real.
+    #[test]
+    fn transcription_cli_without_jobs() {
+        let (tmp, app) = setup();
+        let call = "call_2026-06-01_10-00-00";
+        // fila vazia e pausa do usuário (é o que a CLI grava; a app aplica no polling)
+        let (v, notify) = run(&app, &["queue"]).unwrap();
+        assert_eq!(v, json!({"paused": null, "jobs": []}));
+        assert!(notify.is_none());
+        let (v, notify) = run(&app, &["queue", "pause"]).unwrap();
+        assert_eq!(v["paused"], "user");
+        assert_eq!(notify.unwrap()["event"], "changed");
+        assert_eq!(app.setting(keys::QUEUE_PAUSED).unwrap().as_deref(), Some("1"));
+        assert_eq!(run(&app, &["queue", "list"]).unwrap().0["paused"], "user");
+        assert_eq!(run(&app, &["queue", "resume"]).unwrap().0["paused"], Value::Null);
+        assert_eq!(app.setting(keys::QUEUE_PAUSED).unwrap().as_deref(), Some("0"));
+        assert!(run(&app, &["queue", "cancel", "999"]).is_err_and(|e| e.code() == "not_found"));
+
+        // simulação: não cria tarefa, devolve o que seria enfileirado
+        let (v, notify) = run(&app, &["transcribe", call, "--dry-run", "--kind", "resegment", "--speakers", "2", "--language", "es"]).unwrap();
+        assert!(notify.is_none());
+        assert_eq!(v["dry_run"], true);
+        assert_eq!(v["result"]["call_key"], call);
+        assert_eq!(v["result"]["kind"], "resegment");
+        assert_eq!(v["result"]["options"]["expected_speakers"], 2);
+        assert_eq!(v["result"]["options"]["language"], "es");
+        assert_eq!(run(&app, &["queue"]).unwrap().0["jobs"], json!([]));
+        let (v, _) = run(&app, &["transcribe", "--pending", "--dry-run"]).unwrap();
+        assert!(v["result"].is_array());
+        assert!(run(&app, &["transcribe", "call_inexistente", "--dry-run"]).is_err_and(|e| e.code() == "not_found"));
+        // chamada importada só com texto não tem áudio: nunca vira tarefa (e a app nem é acordada)
+        let sock = tmp.path().join("nope.sock");
+        let args = TranscribeArgs { call: Some(call.into()), ..Default::default() };
+        let err = exec_transcribe(&app, args, Lang::EnUs, &sock).err().expect("sem áudio");
+        assert!(["no_audio", "not_implemented"].contains(&err.code()), "{}", err.code());
+    }
+
+    #[test]
+    fn setup_status_json_shape() {
+        let (_tmp, app) = setup();
+        let (v, _) = run(&app, &["setup", "status"]).unwrap();
+        let mut keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, ["fake_worker", "models", "runtime", "setup"], "o JSON de transcription_status sem a fila");
+        assert_eq!(v["setup"], json!({"running": false, "phase": null}));
+        let ids: Vec<_> = v["models"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["whisper", "segmentation", "embedding"]);
+        assert!(v["runtime"]["state"].is_string() && v["runtime"]["runtime_version"].is_u64());
     }
 
     #[test]

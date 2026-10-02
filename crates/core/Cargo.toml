@@ -1,0 +1,28 @@
+[package]
+name = "transcricoes-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "core_lib"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+chrono.workspace = true
+regex.workspace = true
+directories.workspace = true
+hound.workspace = true
+flacenc.workspace = true
+deunicode.workspace = true
+# só tipos do sidecar e reparo de WAV: sem o backend libpulse (o shell Tauri liga o backend)
+transcricoes-recorder = { path = "../recorder", default-features = false }
+
+[dev-dependencies]
+tempfile.workspace = true
+claxon = "0.4"
+md-5 = "0.10"

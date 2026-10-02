@@ -1,0 +1,25 @@
+# build
+/target/
+/node_modules/
+/dist/
+/src-tauri/gen/
+
+# dados de usuário: nunca versionar gravações, transcrições ou bancos
+*.wav
+*.flac
+*.db
+*.db-wal
+*.db-shm
+call_*
+!crates/core/tests/fixtures/call_*
+.env
+.env.*
+!crates/core/tests/fixtures/edits/call_*
+
+# documentos de trabalho locais (contêm contexto interno; não publicar)
+/HANDOFF.md
+/RECORDING_SPIKE.md
+/GLOSSARY_CONTRACT.md
+/RECORDING_CONTRACT.md
+/PLAN.md
+/PROTOTYPE.md

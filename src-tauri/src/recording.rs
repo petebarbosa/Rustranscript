@@ -1,4 +1,4 @@
-//! Gravação no shell Tauri (agente B): estado da gravação, comandos para a UI, eventos e atendimento
+//! Gravação no shell Tauri: estado da gravação, comandos para a UI, eventos e atendimento
 //! das requisições do socket (CLI). **A GUI é dona do gravador**: no máximo uma `ActiveRecording`.
 //! Contrato (comandos, eventos, payloads): `RECORDING_CONTRACT.md`.
 //!
@@ -109,6 +109,8 @@ pub struct RecState {
     bar_auto: AtomicBool,
     /// Saída confirmada: `ExitRequested` não deve mais ser impedido.
     quitting: AtomicBool,
+    /// Há um diálogo "fechar durante a gravação" aberto (evita empilhar vários com cliques repetidos no X).
+    close_prompt: AtomicBool,
     /// Último resultado de registro do atalho global (lido por `status`/`record_info`).
     pub shortcut: Mutex<ShortcutInfo>,
 }
@@ -123,6 +125,7 @@ impl RecState {
             op: Mutex::new(()),
             bar_auto: AtomicBool::new(false),
             quitting: AtomicBool::new(false),
+            close_prompt: AtomicBool::new(false),
             shortcut: Mutex::new(ShortcutInfo { accelerator: None, supported: shortcut::supported(), registered: false, error: None }),
         }
     }
@@ -138,6 +141,22 @@ impl RecState {
 
     pub fn is_quitting(&self) -> bool {
         self.quitting.load(Ordering::SeqCst)
+    }
+
+    /// Reserva o diálogo de fechar; `false` se já há um aberto.
+    pub fn begin_close_prompt(&self) -> bool {
+        !self.close_prompt.swap(true, Ordering::SeqCst)
+    }
+
+    pub fn end_close_prompt(&self) {
+        self.close_prompt.store(false, Ordering::SeqCst);
+    }
+
+    /// Espera as finalizações em segundo plano terminarem (usado por "Parar e sair").
+    pub fn wait_finalized(&self) {
+        while !lock(&self.finalizing).is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
     }
 }
 
@@ -188,7 +207,7 @@ pub fn emit_state(handle: &AppHandle) {
 }
 
 /// Mostra um erro de uma ação sem janela de retorno (atalho, tray): diálogo nativo.
-fn report_error(handle: &AppHandle, e: &CmdError) {
+pub fn report_error(handle: &AppHandle, e: &CmdError) {
     let l = lang(handle);
     let text = format!("{}: {}", i18n::error_prefix(l, &e.code), e.detail);
     handle.dialog().message(text).title(i18n::msg(l, "rec_error_title")).kind(MessageDialogKind::Error).show(|_| {});

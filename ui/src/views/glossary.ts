@@ -98,7 +98,7 @@ export async function renderGlossary(el: HTMLElement, params: URLSearchParams): 
       <p class="mt-2 max-w-3xl text-sm text-zinc-500">${esc(t('glossary.intro'))}</p>
 
       <div class="mt-6 flex flex-wrap items-end gap-3">
-        <label class="min-w-[16rem] flex-1 text-sm"><span class="mb-1.5 block text-zinc-400">${esc(t('glossary.context'))}</span>
+        <label class="min-w-[16rem] basis-full flex-1 text-sm min-[900px]:basis-0"><span class="mb-1.5 block text-zinc-400">${esc(t('glossary.context'))}</span>
           <select id="ctx" class="${inputCls}">${contexts.map(c => `<option value="${esc(c.value)}" ${c.value === keyOf(ctx) ? 'selected' : ''}>${esc(c.label)}</option>`).join('')}</select></label>
         <button id="import" type="button" class="${btnCls.btn}">${esc(t('glossary.import'))}</button>
         <button id="add" type="button" class="${btnCls.btnPrimary}">+ ${esc(t(tab === 'replace' ? 'glossary.add_replace' : 'glossary.add_term'))}</button>

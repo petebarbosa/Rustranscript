@@ -79,12 +79,12 @@ export async function renderRecord(el: HTMLElement): Promise<View> {
         <span id="elapsed" class="font-mono text-3xl tabular-nums text-white">00:00</span>
       </div>
       <h2 class="mb-3 text-sm font-semibold text-white">${esc(t('record.what'))}</h2>
-      <div class="grid gap-4 sm:grid-cols-2">
+      <div class="grid gap-4 min-[900px]:grid-cols-2">
         <label class="block text-sm"><span class="mb-1.5 block text-zinc-400">${esc(t('assign.company'))}</span>
           <select id="f-lib" class="${inputCls}"></select></label>
         <label id="client-wrap" class="block text-sm"><span class="mb-1.5 block text-zinc-400">${esc(t('assign.client'))}</span>
           <select id="f-client" class="${inputCls}"></select></label>
-        <label class="block text-sm sm:col-span-2"><span class="mb-1.5 block text-zinc-400">${esc(t('call.title'))} <span class="text-zinc-600">· ${esc(t('record.optional'))}</span></span>
+        <label class="block text-sm min-[900px]:col-span-2"><span class="mb-1.5 block text-zinc-400">${esc(t('call.title'))} <span class="text-zinc-600">· ${esc(t('record.optional'))}</span></span>
           <input id="f-title" maxlength="200" autocomplete="off" class="${inputCls}" placeholder="${esc(placeholder)}">
           <span class="mt-1 block text-xs text-zinc-600">${esc(t('call.title_hint'))}</span></label>
         <label class="block text-sm"><span class="mb-1.5 block text-zinc-400">${esc(t('record.speakers'))} <span class="text-zinc-600">· ${esc(t('record.optional'))}</span></span>
@@ -100,7 +100,7 @@ export async function renderRecord(el: HTMLElement): Promise<View> {
 
     <section class="mt-6 rounded-2xl border border-white/10 bg-ink-900/60 p-5">
       <h2 class="text-sm font-semibold text-white">${esc(t('record.devices'))}</h2>
-      <div class="mt-3 grid gap-5 sm:grid-cols-2">
+      <div class="mt-3 grid gap-5 min-[900px]:grid-cols-2">
         <div><label class="block text-sm"><span class="mb-1.5 block text-zinc-400">${esc(t('record.mic'))}</span>
             <select id="f-mic" class="${inputCls}">${devOpts(micDevs, f.mic)}</select></label>
           <div class="mt-3">${meter('mic')}</div></div>

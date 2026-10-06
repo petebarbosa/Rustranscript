@@ -70,7 +70,7 @@ export async function renderSettings(el: HTMLElement): Promise<View> {
       <pre id="snip-${id}" class="mt-2 overflow-x-auto rounded-xl bg-ink-950 p-3 text-xs text-zinc-300">${esc(code)}</pre></div>`
     return `<section id="rec-settings" class="mt-8 space-y-5 rounded-2xl border border-white/10 bg-ink-900/60 p-5">
       <h2 class="text-sm font-semibold text-white">${esc(t('settings.record.title'))}</h2>
-      <div class="grid gap-4 sm:grid-cols-2">
+      <div class="grid gap-4 min-[900px]:grid-cols-2">
         <label class="block text-sm"><span class="mb-1.5 block text-zinc-400">${esc(t('settings.record.mic_default'))}</span>
           <select id="rec-mic" class="${inputCls}">${dev(all.filter(d => !d.is_monitor), inf.last_used.mic)}</select></label>
         <label class="block text-sm"><span class="mb-1.5 block text-zinc-400">${esc(t('settings.record.sys_default'))}</span>
@@ -132,10 +132,10 @@ export async function renderSettings(el: HTMLElement): Promise<View> {
           <button id="add-lib" type="button" class="${btnCls.btn}">+ ${esc(t('nav.add_company'))}</button>
         </div>
         <p class="mt-1 text-xs text-zinc-600">${esc(t('settings.companies_hint'))}</p>
-        <ul class="mt-3 space-y-2">${companies.map(l => `<li class="flex items-center gap-3 rounded-xl border border-white/10 bg-ink-900/60 px-4 py-3">
-          <div class="min-w-0 flex-1"><p class="font-medium text-zinc-100">${esc(l.name)} ${l.available ? '' : `<span class="text-xs text-rose-300">· ${esc(t('nav.offline'))}</span>`}</p>
+        <ul class="mt-3 space-y-2">${companies.map(l => `<li class="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-white/10 bg-ink-900/60 px-4 py-3">
+          <div class="min-w-0 basis-56 flex-1"><p class="font-medium text-zinc-100">${esc(l.name)} ${l.available ? '' : `<span class="text-xs text-rose-300">· ${esc(t('nav.offline'))}</span>`}</p>
             <p class="truncate font-mono text-xs text-zinc-500">${esc(l.path)}</p></div>
-          <span class="text-xs text-zinc-500">${esc(t('settings.calls', { n: l.call_count, count: fmtNumber(l.call_count) }))}</span>
+          <span class="whitespace-nowrap text-xs text-zinc-500">${esc(t('settings.calls', { n: l.call_count, count: fmtNumber(l.call_count) }))}</span>
           <button type="button" data-rename="${l.id}" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/5 hover:text-zinc-100">${esc(t('common.rename'))}</button>
           <button type="button" data-remove="${l.id}" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-rose-400/10 hover:text-rose-200">${esc(t('settings.unregister'))}</button>
         </li>`).join('') || `<li class="text-sm text-zinc-600">${esc(t('nav.no_companies'))}</li>`}</ul>

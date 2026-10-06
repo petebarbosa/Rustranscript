@@ -42,7 +42,7 @@ export function mountTranscriptionSettings(el: HTMLElement): () => void {
       ${check('transcription_low_priority', t('settings.transcription.low_priority'))}
       <details id="tx-advanced" class="rounded-xl border border-white/10 bg-ink-950/50 p-4">
         <summary class="cursor-pointer text-sm font-medium text-zinc-200">${esc(t('settings.transcription.advanced'))}</summary>
-        <div class="mt-4 grid gap-4 sm:grid-cols-2">
+        <div class="mt-4 grid gap-4 min-[900px]:grid-cols-2">
           ${num('transcription_threads', t('settings.transcription.threads'), 0, 16, 1)}
           ${num('transcription_beam_size', t('settings.transcription.beam'), 1, 10, 1)}
           ${num('diarization_threshold', t('settings.transcription.threshold'), 0.1, 2, 0.05)}

@@ -18,9 +18,9 @@ body { background: radial-gradient(1200px 500px at 15% -10%, rgba(139,124,246,.1
 [data-edited] [data-badge] { display: inline-flex; }
 [data-editing][data-edited] [data-revert] { display: inline-flex; }
 /* botão de editar: aparece no hover/foco do trecho (sempre visível em telas sem hover) */
-[data-edit] { opacity: 0; transition: opacity .12s; }
-[data-block]:hover [data-edit], [data-block]:focus-within [data-edit], [data-edit]:focus-visible { opacity: 1; }
-@media (hover: none) { [data-edit] { opacity: 1; } }
+[data-block] [data-edit] { opacity: 0; transition: opacity .12s; }
+[data-block]:hover [data-edit], [data-block]:focus-within [data-edit], [data-block] [data-edit]:focus-visible { opacity: 1; }
+@media (hover: none) { [data-block] [data-edit] { opacity: 1; } }
 [data-editing] [data-edit] { display: none; }
 [data-editing] > div { width: 100%; }
 [data-editing] [data-speaker-btn] { cursor: pointer; text-decoration: underline dotted rgba(255,255,255,.25); text-underline-offset: 3px; }

@@ -160,7 +160,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
         <div class="space-y-3">${s.blocks.map(b => blockHtml(b, spk, order)).join('')}</div></section>`).join('')
 
     el.innerHTML = `
-    <header class="sticky top-0 z-30 border-b border-white/10 bg-ink-950/85 backdrop-blur-xl">
+    <header class="sticky top-0 z-30 border-b border-white/10 bg-ink-950/85 backdrop-blur-xl max-lg:static">
       <div class="mx-auto max-w-6xl px-6 py-3">
         <a href="${back}" class="inline-flex items-center gap-1 text-xs text-zinc-500 hover:text-violet-300">← ${esc(place)}</a>
         <div class="mt-1 flex items-start gap-2">
@@ -181,9 +181,9 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
         </div>
         <div id="job-strip" class="mt-2 empty:hidden">${jobStripHtml()}</div>
         <div class="mt-3 flex flex-wrap items-center gap-2">
-          <div class="relative min-w-[12rem] flex-1" ${pending ? 'hidden' : ''}>
+          <div class="relative min-w-[14rem] flex-1" ${pending ? 'hidden' : ''}>
             <input id="q" type="search" autocomplete="off" placeholder="${esc(t('call.search'))}"
-              class="w-full rounded-xl border border-white/10 bg-ink-900 py-2 pl-4 pr-28 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-violet-400/60 focus:outline-none focus:ring-2 focus:ring-violet-400/20">
+              class="w-full rounded-xl border border-white/10 bg-ink-900 py-2 pl-4 pr-4 not-placeholder-shown:pr-28 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-violet-400/60 focus:outline-none focus:ring-2 focus:ring-violet-400/20">
             <span id="count" class="pointer-events-none absolute right-3 top-2 text-xs text-zinc-500"></span>
           </div>
           <button id="assign" type="button" class="shrink-0 whitespace-nowrap rounded-xl border border-white/10 bg-ink-900 px-3 py-2 text-sm text-zinc-300 hover:border-violet-400/50">${esc(t('call.assign'))}</button>
@@ -205,10 +205,10 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     </div>`
     ro?.disconnect()
     const header = el.querySelector('header')!
-    const syncHeader = () => el.style.setProperty('--hdr', `${header.offsetHeight}px`)
+    const syncHeader = () => el.style.setProperty('--hdr', getComputedStyle(header).position === 'sticky' ? `${header.offsetHeight}px` : '0px')
     syncHeader()
     ro = new ResizeObserver(syncHeader)
-    ro.observe(header)
+    ro.observe(header); ro.observe(el)
     bind()
     if (keepScroll) el.scrollTop = scroll
   }
@@ -418,7 +418,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     const rows = list.map(e => `<li class="rounded-xl border border-white/10 bg-ink-950/60 px-3 py-2 ${e.undone_at ? 'opacity-50' : ''}">
       <div class="flex items-center justify-between gap-2 text-xs text-zinc-500">
         <span class="font-medium text-zinc-300">${esc(describeEntry(e))}</span>
-        <span>${esc(t(`origin.${e.origin}`))} · ${esc(e.at.replace('T', ' '))}${e.undone_at ? ' · ' + esc(t('history.undone_tag')) : ''}</span></div>
+        <span>${esc(t(`origin.${e.origin}`))} · ${esc(fmtDate(e.at))} ${esc(fmtClock(e.at))}${e.undone_at ? ' · ' + esc(t('history.undone_tag')) : ''}</span></div>
       ${e.entity === 'block_speaker' || e.batch_id ? '' : `<div class="mt-1 text-xs"><del class="text-rose-300/70">${short(e.old_value)}</del><br><ins class="text-emerald-300/80 no-underline">${short(e.new_value)}</ins></div>`}
       </li>`).join('')
     const r = await form(t('call.history'),
@@ -558,7 +558,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
         <p class="mt-1.5 text-xs leading-relaxed text-zinc-500">${df.before}</p>
         <p class="mt-1 text-xs leading-relaxed text-zinc-200">${df.after}</p></li>`
     }).join('')
-    const body = `<p class="text-sm text-zinc-300">${esc(t('glossary.apply_summary', { n: rep.blocks_changed, r: rep.replacements }))}</p>
+    const body = `<p class="text-sm text-zinc-300">${esc(t('glossary.apply_summary', { n: rep.blocks_changed }))} · ${esc(t('glossary.apply_replacements', { n: rep.replacements }))}</p>
       <ul class="max-h-[50vh] space-y-2 overflow-y-auto">${rows}</ul>
       <p class="text-xs text-zinc-600">${esc(t('glossary.apply_undo_hint'))}</p>`
     const real = await form(t('glossary.apply_title'), body, t('glossary.apply_ok', { n: rep.blocks_changed }),

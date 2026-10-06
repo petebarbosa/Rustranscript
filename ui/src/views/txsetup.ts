@@ -44,7 +44,7 @@ export function mountSetup(el: HTMLElement): () => void {
         : m.installed ? chip(m.local ? `${t('transcription.model_installed')} · ${t('transcription.model_local')}` : t('transcription.model_installed'), 'ok')
         : m.bytes_done > 0 ? chip(`${fmtBytes(m.bytes_done)} / ${fmtBytes(m.bytes_total)}`, 'warn') : chip(t('transcription.model_missing'), 'off')
       return `<li class="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl border border-white/10 bg-ink-950/50 px-4 py-2.5" data-model="${id}">
-        <span class="min-w-0 flex-1 text-sm text-zinc-200">${esc(t(`transcription.model.${id}`))}${m ? `<span class="ml-2 text-xs text-zinc-500">${esc(fmtBytes(m.bytes_total))}</span>` : ''}</span>
+        <span class="min-w-0 basis-48 flex-1 text-sm text-zinc-200">${esc(t(`transcription.model.${id}`))}${m ? `<span class="ml-2 whitespace-nowrap text-xs text-zinc-500">${esc(fmtBytes(m.bytes_total))}</span>` : ''}</span>
         ${state}
         <button type="button" data-local="${id}" ${s.running ? 'disabled' : ''} class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/5 hover:text-zinc-100 disabled:opacity-40">${esc(t('transcription.import_local'))}</button></li>`
     }).join('')

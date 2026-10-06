@@ -48,8 +48,8 @@ export async function renderQueue(el: HTMLElement): Promise<View> {
           <div class="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
             <span class="rounded-full px-2.5 py-0.5 ${stateTone[j.state]}">${esc(t(`queue.state.${j.state}`))}</span>
             <span>${esc(t(`queue.kind.${j.kind}`))}</span>
-            ${j.attempts > 1 ? `<span>· ${esc(t('queue.attempt', { n: j.attempts }))}</span>` : ''}
-            ${date ? `<span>· ${esc(fmtDate(date))} ${esc(fmtClock(date))}</span>` : ''}
+            ${j.attempts > 1 ? `<span class="whitespace-nowrap">· ${esc(t('queue.attempt', { n: j.attempts }))}</span>` : ''}
+            ${date ? `<span class="whitespace-nowrap">· ${esc(fmtDate(date))} ${esc(fmtClock(date))}</span>` : ''}
           </div>
         </div>
         <div class="flex shrink-0 gap-2">

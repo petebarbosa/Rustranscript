@@ -4,10 +4,15 @@ use std::path::{Path, PathBuf};
 use crate::Result;
 
 pub fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
-    let tmp = tmp_sibling(path);
-    std::fs::write(&tmp, content)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    // sufixo do pid: dois processos gravando o mesmo arquivo (CLI + app) não pisam no temporário um do outro
+    let mut tmp = tmp_sibling(path).into_os_string();
+    tmp.push(format!(".{}", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    let result = std::fs::write(&tmp, content).and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    Ok(result?)
 }
 
 pub fn tmp_sibling(path: &Path) -> PathBuf {

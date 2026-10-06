@@ -810,6 +810,11 @@ fn find_call(app: &App, reference: &str) -> core_lib::Result<(Library, i64)> {
     Ok((app.open_library(lib)?, id))
 }
 
+/// Socket da app; nos testes, um caminho sem servidor dentro do tempdir (nunca consulta a app real do usuário).
+fn sock(app: &App) -> std::path::PathBuf {
+    if cfg!(test) { app.data_dir.join("sem-app.sock") } else { paths::socket_path(&app.data_dir) }
+}
+
 fn exec(app: &App, cmd: Cmd, lang: Lang, json_out: bool) -> core_lib::Result<Output> {
     let json = |v: Value| Ok(Output::Json(v, None));
     let dry = |dry_run: bool, v: Value, lib: i64, call: Option<i64>| {
@@ -1011,11 +1016,11 @@ fn exec(app: &App, cmd: Cmd, lang: Lang, json_out: bool) -> core_lib::Result<Out
         },
         Cmd::Glossary { what } => exec_glossary(app, what, lang),
         // fase 3: corpos a cargo do agente B (contrato: RECORDING_CONTRACT.md, "CLI")
-        Cmd::Record { what } => exec_record(app, what, lang, json_out, &paths::socket_path(&app.data_dir)),
-        Cmd::Status => exec_status(app, lang, json_out, &paths::socket_path(&app.data_dir)),
-        Cmd::Bar { what } => exec_bar(app, what, lang, json_out, &paths::socket_path(&app.data_dir)),
-        Cmd::Transcribe(a) => exec_transcribe(app, a, lang, &paths::socket_path(&app.data_dir)),
-        Cmd::Queue { what } => exec_queue(app, what.unwrap_or(QueueCmd::List), lang, &paths::socket_path(&app.data_dir)),
+        Cmd::Record { what } => exec_record(app, what, lang, json_out, &sock(app)),
+        Cmd::Status => exec_status(app, lang, json_out, &sock(app)),
+        Cmd::Bar { what } => exec_bar(app, what, lang, json_out, &sock(app)),
+        Cmd::Transcribe(a) => exec_transcribe(app, a, lang, &sock(app)),
+        Cmd::Queue { what } => exec_queue(app, what.unwrap_or(QueueCmd::List), lang, &sock(app)),
         Cmd::Setup { what } => exec_setup(app, what, lang),
         Cmd::Reclaimable => {
             let files = import::reclaimable(app)?;

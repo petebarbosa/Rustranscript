@@ -23,7 +23,8 @@ pub const UV_BYTES: u64 = 19_916_278;
 /// Membro do tar com o binário (`uv-x86_64-unknown-linux-gnu/uv`).
 pub const UV_TAR_MEMBER: &str = "uv-x86_64-unknown-linux-gnu/uv";
 pub const PYTHON_VERSION: &str = "3.12.15";
-/// Sobe quando mudar o lock, o `worker.py` ou o protocolo: `manifest.json` diferente = reinstalar/atualizar.
+/// Sobe quando mudar o lock ou o protocolo: `manifest.json` diferente = reinstalar/atualizar. Só o `worker.py` mudar
+/// não precisa: `status_with` atualiza o script e o `worker_sha256` sozinho (sem refazer o venv).
 pub const RUNTIME_VERSION: u32 = 1;
 
 pub const WORKER_PY: &str = include_str!("../../../../worker/worker.py");
@@ -71,7 +72,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// Marca de runtime instalado (`<runtime>/manifest.json`); é o que decide `ready` × `outdated`.
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct Manifest {
     runtime_version: u32,
     uv: String,
@@ -100,6 +101,18 @@ pub fn status(data_dir: &Path) -> Result<RuntimeStatus> {
     status_with(data_dir, std::env::var(FAKE_WORKER_ENV).is_ok_and(|v| !v.trim().is_empty()))
 }
 
+/// Se o manifest instalado só difere do esperado no `worker_sha256` (lock, uv, Python e versão iguais), o venv
+/// continua valendo: grava o `worker.py` embutido e depois o manifest (ambos atômicos), sem rede nem botão. Dois
+/// processos fazendo isso juntos gravam os mesmos bytes; um worker em execução já carregou o script na memória.
+/// `false` se há outra diferença ou se a gravação falhar (o status cai para `outdated`).
+fn refresh_worker_if_only_change(p: &RuntimePaths, installed: &Manifest, want: &Manifest) -> bool {
+    let only_worker = Manifest { worker_sha256: want.worker_sha256.clone(), ..installed.clone() } == *want;
+    if !only_worker {
+        return false;
+    }
+    fsx::write_atomic(&p.worker, WORKER_PY.as_bytes()).and_then(|()| fsx::write_atomic(&p.manifest, &serde_json::to_vec_pretty(want)?)).is_ok()
+}
+
 fn status_with(data_dir: &Path, fake: bool) -> Result<RuntimeStatus> {
     let p = paths(data_dir);
     let manifest = read_manifest(&p);
@@ -111,7 +124,7 @@ fn status_with(data_dir: &Path, fake: bool) -> Result<RuntimeStatus> {
             Some(_) if !p.python.exists() => "missing",
             Some(m) => {
                 let want = expected_manifest(m.installed_at.clone());
-                if *m == want { "ready" } else { "outdated" }
+                if *m == want || refresh_worker_if_only_change(&p, m, &want) { "ready" } else { "outdated" }
             }
         }
     };
@@ -287,7 +300,7 @@ mod tests {
         std::fs::write(&p.manifest, serde_json::to_vec(&m).unwrap()).unwrap();
         let st = status_with(dir.path(), false).unwrap();
         assert_eq!((st.state.as_str(), st.installed_at.as_deref()), ("ready", Some("2026-01-01T00:00:00")));
-        for tweak in [|m: &mut Manifest| m.runtime_version += 1, |m: &mut Manifest| m.lock_sha256 = "0".into(), |m: &mut Manifest| m.worker_sha256 = "0".into(), |m: &mut Manifest| m.uv = "0.0.1".into()] {
+        for tweak in [|m: &mut Manifest| m.runtime_version += 1, |m: &mut Manifest| m.lock_sha256 = "0".into(), |m: &mut Manifest| m.uv = "0.0.1".into(), |m: &mut Manifest| m.python = "0.0.1".into()] {
             tweak(&mut m);
             std::fs::write(&p.manifest, serde_json::to_vec(&m).unwrap()).unwrap();
             assert_eq!(status_with(dir.path(), false).unwrap().state, "outdated");
@@ -300,6 +313,55 @@ mod tests {
         // manifest ilegível = nada instalado
         std::fs::write(&p.manifest, b"{").unwrap();
         assert_eq!(status_with(dir.path(), false).unwrap().state, "missing");
+    }
+
+    fn installed(dir: &Path) -> RuntimePaths {
+        let p = paths(dir);
+        std::fs::create_dir_all(p.python.parent().unwrap()).unwrap();
+        std::fs::write(&p.python, b"").unwrap();
+        p
+    }
+
+    #[test]
+    fn worker_only_change_is_refreshed_silently() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = installed(dir.path());
+        let mut m = expected_manifest("2026-01-01T00:00:00".into());
+        m.worker_sha256 = "0".into();
+        std::fs::write(&p.manifest, serde_json::to_vec(&m).unwrap()).unwrap();
+        std::fs::write(&p.worker, b"# worker antigo").unwrap();
+        let st = status_with(dir.path(), false).unwrap();
+        assert_eq!((st.state.as_str(), st.installed_at.as_deref()), ("ready", Some("2026-01-01T00:00:00")));
+        assert_eq!(std::fs::read_to_string(&p.worker).unwrap(), WORKER_PY);
+        assert_eq!(read_manifest(&p).unwrap(), expected_manifest("2026-01-01T00:00:00".into()));
+        // sem venv novo nem sobras de gravação
+        assert!(!p.root.join("venv.new").exists() && !fsx::tmp_sibling(&p.worker).exists());
+    }
+
+    #[test]
+    fn worker_change_with_other_difference_stays_outdated() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = installed(dir.path());
+        let mut m = expected_manifest("2026-01-01T00:00:00".into());
+        m.worker_sha256 = "0".into();
+        m.lock_sha256 = "0".into();
+        std::fs::write(&p.manifest, serde_json::to_vec(&m).unwrap()).unwrap();
+        assert_eq!(status_with(dir.path(), false).unwrap().state, "outdated");
+        assert!(!p.worker.exists());
+        assert_eq!(read_manifest(&p).unwrap(), m);
+    }
+
+    #[test]
+    fn worker_refresh_failure_reports_outdated() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = installed(dir.path());
+        let mut m = expected_manifest("2026-01-01T00:00:00".into());
+        m.worker_sha256 = "0".into();
+        std::fs::write(&p.manifest, serde_json::to_vec(&m).unwrap()).unwrap();
+        // worker.py é um diretório: o rename atômico falha
+        std::fs::create_dir(&p.worker).unwrap();
+        assert_eq!(status_with(dir.path(), false).unwrap().state, "outdated");
+        assert_eq!(read_manifest(&p).unwrap(), m);
     }
 
     #[test]

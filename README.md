@@ -1,5 +1,7 @@
 # Transcriptary
 
+<p align="center"><img src="assets/icon.png" width="160" alt="Transcriptary logo"></p>
+
 Records your calls, transcribes them and tells the speakers apart. Everything
 happens on your machine: audio and text never leave your computer.
 

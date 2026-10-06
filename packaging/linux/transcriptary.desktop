@@ -8,6 +8,6 @@ Comment[es]=Graba y transcribe tus reuniones localmente
 Exec=tary
 Icon=transcriptary
 Terminal=false
-Categories=AudioVideo;Office;
+Categories=AudioVideo;Audio;Recorder;
 Keywords=record;transcribe;meeting;call;speech;
 StartupWMClass=Tary

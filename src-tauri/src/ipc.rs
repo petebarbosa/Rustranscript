@@ -164,21 +164,34 @@ pub fn request_on(sock: &Path, req: &Request, timeout: Duration) -> Result<Respo
 /// `RSTT_DATA_DIR` apontando para `data_dir`, stdio nulo e em grupo de processos próprio.
 /// Subir duas vezes é inofensivo: o plugin de instância única absorve a segunda.
 pub fn spawn_gui(data_dir: &Path) -> std::io::Result<()> {
+    let mut cmd = detached()?;
+    cmd.env(paths::DATA_DIR_ENV, data_dir).env(HIDDEN_ENV, "1");
+    cmd.spawn().map(|_| ())
+}
+
+/// `rstt` sem argumentos num terminal: abre a janela (`rstt gui`) solta e devolve o prompt na hora; os avisos do
+/// GTK/WebKit não sujam o terminal. Quem quiser os logs roda `rstt gui`, que fica em primeiro plano.
+pub fn spawn_window_detached() -> std::io::Result<()> {
+    let mut cmd = detached()?;
+    cmd.arg("gui");
+    cmd.spawn().map(|_| ())
+}
+
+/// O próprio executável (o `.AppImage`, se for o caso) sem stdio e em grupo de processos próprio (Ctrl+C no
+/// terminal não o derruba).
+fn detached() -> std::io::Result<std::process::Command> {
     use std::os::unix::process::CommandExt;
     let exe = std::env::var_os("APPIMAGE").filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
     let exe = match exe {
         Some(e) => e,
         None => std::env::current_exe()?,
     };
-    std::process::Command::new(exe)
-        .env(paths::DATA_DIR_ENV, data_dir)
-        .env(HIDDEN_ENV, "1")
-        .stdin(std::process::Stdio::null())
+    let mut cmd = std::process::Command::new(exe);
+    cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .process_group(0)
-        .spawn()
-        .map(|_| ())
+        .process_group(0);
+    Ok(cmd)
 }
 
 /// Garante que a app está ouvindo em `sock`: se não estiver, sobe a GUI (`spawn_gui`) e espera o socket

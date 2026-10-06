@@ -37,7 +37,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Abre a janela (o mesmo que rodar sem argumentos)
+    /// Abre a janela em primeiro plano, com os logs no terminal (sem argumentos, ela abre solta)
     Gui,
     /// Lista chamadas
     List {

@@ -13,7 +13,7 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("rstt:data_dir", "Data directory (default: ~/.local/share/rustranscript or $RSTT_DATA_DIR)", "Directorio de datos (predeterminado: ~/.local/share/rustranscript o $RSTT_DATA_DIR)"),
     ("rstt:lang", "Message language: pt-BR, en-US, es-419", "Idioma de los mensajes: pt-BR, en-US, es-419"),
     ("rstt:json", "`record`, `status` and `bar`: return the full state as JSON instead of a text line", "`record`, `status` y `bar`: devuelve el estado completo en JSON en vez de una línea de texto"),
-    ("rstt gui", "Opens the window (same as running with no arguments)", "Abre la ventana (lo mismo que ejecutar sin argumentos)"),
+    ("rstt gui", "Opens the window in the foreground, logging to the terminal (with no arguments it opens detached)", "Abre la ventana en primer plano, con los registros en la terminal (sin argumentos, se abre suelta)"),
     ("rstt list", "Lists calls", "Lista llamadas"),
     ("rstt list:library", "Company/project (id or name); without it, all", "Empresa/proyecto (id o nombre); sin esto, todas"),
     ("rstt list:client", "Client (id, name or slug), within --library", "Cliente (id, nombre o slug), dentro de --library"),

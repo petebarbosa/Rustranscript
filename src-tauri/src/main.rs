@@ -19,6 +19,9 @@ fn main() {
     // e funcione sem tela.
     let args: Vec<_> = std::env::args_os().collect();
     if args.len() <= 1 {
+        if std::io::IsTerminal::is_terminal(&std::io::stderr()) && ipc::spawn_window_detached().is_ok() {
+            return;
+        }
         gui::run(None);
     } else {
         std::process::exit(cli::run(args));

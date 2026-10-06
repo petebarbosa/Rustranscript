@@ -271,6 +271,142 @@ class ApplyMute(unittest.TestCase):
         self.assertEqual(sum(a.v), 100.0)
 
 
+_worker_mod = None
+
+
+def load_worker():
+    global _worker_mod
+    if _worker_mod is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("tary_worker", WORKER)
+        _worker_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_worker_mod)
+    return _worker_mod
+
+
+def vec(cos, axis=0):
+    """Vetor unitário com cosseno `cos` em relação ao eixo `axis` (o resto vai para o eixo seguinte)."""
+    v = [0.0] * 4
+    v[axis], v[(axis + 1) % 4] = cos, math.sqrt(1 - cos * cos)
+    return v
+
+
+class MergeVoices(unittest.TestCase):
+    """Lógica pura de junção pela voz (#25): sem modelos, com vetores sintéticos."""
+    X, Y = [1.0, 0, 0, 0], [0, 1.0, 0, 0]
+
+    def setUp(self):
+        self.w = load_worker()
+
+    def merge(self, speech, cents, **kw):
+        return self.w.merge_voices(speech, cents, **kw)
+
+    def test_same_voice_fragments_merge(self):
+        # B é pedaço da mesma voz que A (cos 0.94), com fala de sobra para ser pessoa: junta pela voz
+        r = self.merge([100.0, 40.0], [self.X, vec(0.94)])
+        self.assertEqual((r["labels"], r["kept"]), ([0, 0], 1))
+        self.assertEqual([row[1] for row in r["rows"]], [None, 0])
+        self.assertAlmostEqual(r["rows"][1][2], 0.94)
+
+    def test_distinct_voices_stay(self):
+        r = self.merge([100.0, 40.0], [self.X, vec(0.6)])
+        self.assertEqual((r["labels"], r["kept"]), ([0, 1], 2))
+        self.assertEqual([row[1] for row in r["rows"]], [None, None])
+
+    def test_threshold_is_inclusive(self):
+        self.assertEqual(self.merge([100.0, 40.0], [self.X, vec(0.78)])["kept"], 1)
+        self.assertEqual(self.merge([100.0, 40.0], [self.X, vec(0.77)])["kept"], 2)
+        self.assertEqual(self.merge([100.0, 40.0], [self.X, vec(0.74)], merge_similarity=0.7)["kept"], 1)
+
+    def test_small_cluster_merges_regardless_of_voice(self):
+        r = self.merge([100.0, 14.9], [self.X, self.Y])  # cos 0, mas < 15 s
+        self.assertEqual((r["labels"], r["kept"]), ([0, 0], 1))
+        self.assertEqual(self.merge([100.0, 15.0], [self.X, self.Y])["kept"], 2)  # 15 s já é pessoa
+        self.assertEqual(self.merge([100.0, 20.0], [self.X, self.Y], min_speaker_s=30.0)["kept"], 1)
+
+    def test_biggest_cluster_is_always_kept(self):
+        r = self.merge([5.0, 3.0], [self.X, self.Y])
+        self.assertEqual((r["labels"], r["kept"]), ([0, 0], 1))
+
+    def test_merges_into_the_most_similar_kept(self):
+        # C parece mais com B (cos 0.9) do que com A (0.2): junta em B, que continua pessoa própria
+        c = [0.2, math.sqrt(0.9 ** 2 - 0.2 ** 2), math.sqrt(1 - 0.81), 0]
+        r = self.merge([100.0, 60.0, 30.0], [self.X, self.Y, c])
+        self.assertEqual((r["labels"], r["kept"]), ([0, 1, 1], 2))
+        self.assertEqual(r["rows"][2][1], 1)  # na lista ordenada por fala, junta no 2º
+
+    def test_cap_merges_least_speech_first_into_most_similar(self):
+        cents = [self.X, self.Y, [0, 0, 1.0, 0], vec(0.6, 2)]  # D (4º) parece mais com C (cos 0.6)
+        speech = [100.0, 90.0, 50.0, 40.0]
+        self.assertEqual(self.merge(speech, cents)["kept"], 4)
+        r = self.merge(speech, cents, max_speakers=3)
+        self.assertEqual((r["labels"], r["kept"]), ([0, 1, 2, 2], 3))  # só o de menos fala (D) junta, em C
+        r = self.merge(speech, cents, max_speakers=2)
+        # sobram A (100), B (90) e C+D (90): empate, sai o de menos fala original (C+D); sem parecido, vai para A
+        self.assertEqual((r["labels"], r["kept"]), ([0, 1, 0, 0], 2))
+        r = self.merge(speech, cents, max_speakers=1)
+        self.assertEqual((r["labels"], r["kept"]), ([0, 0, 0, 0], 1))
+
+    def test_cap_above_count_changes_nothing(self):
+        r = self.merge([100.0, 40.0], [self.X, vec(0.6)], max_speakers=5)
+        self.assertEqual((r["labels"], r["kept"]), ([0, 1], 2))
+
+    def test_renumbered_by_speech(self):
+        # entrada fora de ordem: grupo 2 é o que mais fala; 1 e 3 são a mesma voz (somam 60 s < 100 s)
+        r = self.merge([10.0, 40.0, 100.0, 20.0], [vec(0.9, 1), self.Y, self.X, vec(0.9, 1)])
+        self.assertEqual((r["labels"], r["kept"]), ([1, 1, 0, 1], 2))
+
+    def test_total_speech_after_merge_decides_the_numbering(self):
+        # A (50) e B (45) são pessoas; C (30) é a voz de B: B+C = 75 passa A e vira o 0
+        r = self.merge([50.0, 45.0, 30.0], [self.X, self.Y, vec(0.9, 1)])
+        self.assertEqual(r["labels"], [1, 0, 0])
+
+    def test_rows_are_numbers_only_in_speech_order(self):
+        r = self.merge([10.0, 100.0], [self.X, self.Y])
+        self.assertEqual([row[0] for row in r["rows"]], [100.0, 10.0])
+        json.dumps(r, allow_nan=False)
+
+    def test_pick_turns_prefers_long_turns_and_falls_back_to_the_longest(self):
+        w = self.w
+        turns = [(0, 0.5), (1, 3), (5, 5.9), (10, 20), (30, 31.5)]
+        self.assertEqual(w.pick_turns(turns, k=2), [(10, 20), (1, 3)])
+        self.assertEqual(w.pick_turns(turns, k=20), [(10, 20), (1, 3), (30, 31.5)])
+        self.assertEqual(w.pick_turns([(0, 0.5), (4, 4.8)]), [(4, 4.8)])
+        self.assertEqual(w.pick_turns([]), [])
+
+    def test_cosine_ignores_norm_and_zero_vector(self):
+        w = self.w
+        self.assertAlmostEqual(w.cosine([2, 0], [5, 0]), 1.0)
+        self.assertEqual(w.cosine([0, 0], [1, 0]), 0.0)
+
+
+class ParseDiarizeRequest(unittest.TestCase):
+    def parse(self, **extra):
+        msg = {"type": "diarize", "id": "d", "audio": "/a", "seg_model": "/s", "emb_model": "/e"}
+        msg.update(extra)
+        return load_worker().parse_request(msg)
+
+    def test_defaults(self):
+        p = self.parse()
+        self.assertEqual((p["max_speakers"], p["merge_similarity"], p["min_speaker_s"], p["threshold"]), (None, 0.78, 15.0, 0.9))
+
+    def test_new_fields(self):
+        p = self.parse(max_speakers=6, merge_similarity=0.7, min_speaker_s=30, threshold=0.8)
+        self.assertEqual((p["max_speakers"], p["merge_similarity"], p["min_speaker_s"], p["threshold"]), (6, 0.7, 30.0, 0.8))
+
+    def test_num_clusters_is_the_old_name_of_max_speakers(self):
+        self.assertEqual(self.parse(num_clusters=4)["max_speakers"], 4)
+        self.assertEqual(self.parse(num_clusters=4, max_speakers=2)["max_speakers"], 2)
+        self.assertIsNone(self.parse(num_clusters=0)["max_speakers"])
+        self.assertIsNone(self.parse(num_clusters=-1)["max_speakers"])
+
+    def test_invalid_values(self):
+        w = load_worker()
+        for bad in ({"max_speakers": "3"}, {"merge_similarity": 1.5}, {"merge_similarity": "x"}, {"min_speaker_s": -1}):
+            with self.assertRaises(w.BadRequest, msg=str(bad)):
+                self.parse(**bad)
+
+
 class FakeDiarizeEnergy(FakeBase):
     def diarize(self, rid="d1", n=None):
         return {"type": "diarize", "id": rid, "audio": self.sys_flac, "seg_model": "/s", "emb_model": "/e",
@@ -281,6 +417,12 @@ class FakeDiarizeEnergy(FakeBase):
         r = self.w.until()[-1]
         self.assertEqual(r["turns"], [{"start": 0.0, "end": 15.0, "speaker": 0}, {"start": 15.0, "end": 23.0, "speaker": 1}])
         self.assertEqual(r["speakers"], 2)
+
+    def test_diarize_max_speakers_is_accepted(self):
+        write_flac_header(self.sys_flac, 50.0)
+        self.w.send(dict(self.diarize(), max_speakers=3, merge_similarity=0.7, min_speaker_s=10.0))
+        r = self.w.until()[-1]
+        self.assertEqual((r["type"], r["speakers"]), ("result", 3))
 
     def test_diarize_three_clusters(self):
         write_flac_header(self.sys_flac, 50.0)

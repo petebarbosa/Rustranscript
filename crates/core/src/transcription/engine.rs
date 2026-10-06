@@ -157,11 +157,12 @@ impl Engine for FakeEngine {
                     speakers: None,
                     step_ms: None,
                     db: None,
+                    merge: None,
                 }))
             }
-            ToWorker::Diarize { id, audio, num_clusters, mute, .. } => {
+            ToWorker::Diarize { id, audio, max_speakers, mute, .. } => {
                 let dur = flac_duration_s(Path::new(audio))?;
-                let modulo = if num_clusters.unwrap_or(0) >= 3 { 3 } else { 2 };
+                let modulo = if max_speakers.unwrap_or(0) >= 3 { 3 } else { 2 };
                 let mut turns = Vec::new();
                 let mut k = 0i64;
                 while (k as f64) * 15.0 < dur {
@@ -187,6 +188,7 @@ impl Engine for FakeEngine {
                     speakers: Some(speakers),
                     step_ms: None,
                     db: None,
+                    merge: Some(serde_json::json!({ "raw": speakers, "final": speakers, "clusters": [] })),
                 }))
             }
             ToWorker::Energy { id, audio, step_ms, mute } => {
@@ -205,6 +207,7 @@ impl Engine for FakeEngine {
                     speakers: None,
                     step_ms: Some(*step_ms),
                     db: Some(db),
+                    merge: None,
                 }))
             }
             ToWorker::Cancel { .. } | ToWorker::Shutdown => Err(Error::invalid("not a request")),

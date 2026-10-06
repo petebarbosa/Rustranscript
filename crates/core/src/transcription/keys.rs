@@ -17,12 +17,17 @@ pub const THREADS: &str = "transcription_threads";
 pub const VAD_MIN_SILENCE_MS: &str = "transcription_vad_min_silence_ms";
 /// `1`: worker com `nice 19` + `ioprio` ocioso. Padrão `1`.
 pub const LOW_PRIORITY: &str = "transcription_low_priority";
-/// Limiar de agrupamento quando não há `expected_speakers`. Padrão `0.9`.
+/// Limiar do agrupamento por voz (o número de pessoas é só teto, não meta). Padrão `0.9`.
 pub const DIARIZATION_THRESHOLD: &str = "diarization_threshold";
-/// Fusão de clusters com menos de X % da fala ... Padrão `5`.
+/// Guarda no Rust: funde por tempo clusters com menos de X % da fala ... Padrão `0` (desligado; quem junta é o
+/// worker, pela voz).
 pub const DIARIZATION_MIN_CLUSTER_PCT: &str = "diarization_min_cluster_pct";
-/// ... ou menos de X segundos de fala. Padrão `10`.
+/// ... ou menos de X segundos de fala. Padrão `0` (desligado).
 pub const DIARIZATION_MIN_CLUSTER_S: &str = "diarization_min_cluster_s";
+/// Cosseno mínimo entre centroides CAM++ para dois grupos serem a mesma pessoa (worker). Padrão `0.78`.
+pub const DIARIZATION_MERGE_SIMILARITY: &str = "diarization_merge_similarity";
+/// Fala mínima (s) para um grupo virar pessoa; abaixo disso junta ao mais parecido (worker). Padrão `15`.
+pub const DIARIZATION_MIN_SPEAKER_S: &str = "diarization_min_speaker_s";
 /// `1`: filtro de vazamento (mic ← sys) ligado. Padrão `1`.
 pub const BLEED_FILTER: &str = "bleed_filter";
 /// Margem do portão de energia, dB. Padrão `15`.
@@ -37,6 +42,7 @@ pub const BLEED_TOLERANCE_S: &str = "bleed_tolerance_s";
 /// Todas as chaves desta fase (a lista de permitidas do shell usa isto).
 pub const ALL: &[&str] = &[
     LANGUAGE, AUTO, QUEUE_PAUSED, HOTWORDS, BEAM_SIZE, THREADS, VAD_MIN_SILENCE_MS, LOW_PRIORITY,
-    DIARIZATION_THRESHOLD, DIARIZATION_MIN_CLUSTER_PCT, DIARIZATION_MIN_CLUSTER_S, BLEED_FILTER,
+    DIARIZATION_THRESHOLD, DIARIZATION_MIN_CLUSTER_PCT, DIARIZATION_MIN_CLUSTER_S, DIARIZATION_MERGE_SIMILARITY,
+    DIARIZATION_MIN_SPEAKER_S, BLEED_FILTER,
     BLEED_MARGIN_DB, BLEED_CONTAINMENT, BLEED_MIN_WORDS, BLEED_TOLERANCE_S,
 ];

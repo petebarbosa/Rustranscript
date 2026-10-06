@@ -20,10 +20,16 @@ import traceback
 from importlib import metadata
 
 PROTOCOL = 1
-WORKER_VERSION = "0.3.0"
+WORKER_VERSION = "0.3.1"
 REQUESTS = ("transcribe", "diarize", "energy")
 SAMPLE_RATE = 16000
 REQUIRED = object()
+# junção de falantes pela voz (#25)
+MERGE_SIMILARITY = 0.78  # cosseno mínimo entre centroides para ser a mesma pessoa
+MIN_SPEAKER_S = 15.0     # abaixo disso de fala o grupo não vira pessoa: junta ao mais parecido
+EMB_TURNS = 20           # turnos por grupo na amostra do centroide
+EMB_MIN_TURN_S = 1.0
+EMB_MAX_TURN_S = 10.0
 
 _proto = None  # stream do protocolo (fd 1 original, duplicado)
 _proto_lock = threading.Lock()
@@ -170,9 +176,18 @@ def parse_request(msg):
     elif kind == "diarize":
         p.update(
             seg_model=field(msg, "seg_model", str), emb_model=field(msg, "emb_model", str),
-            num_clusters=field(msg, "num_clusters", int, None), threshold=field(msg, "threshold", float, 0.9),
-            threads=field(msg, "threads", int, 0),
+            threshold=field(msg, "threshold", float, 0.9), threads=field(msg, "threads", int, 0),
+            merge_similarity=field(msg, "merge_similarity", float, MERGE_SIMILARITY),
+            min_speaker_s=field(msg, "min_speaker_s", float, MIN_SPEAKER_S),
         )
+        # teto de falantes (o número que o usuário informa); `num_clusters` é o nome antigo do mesmo campo
+        mx = field(msg, "max_speakers", int, None)
+        p["max_speakers"] = (mx if mx is not None else field(msg, "num_clusters", int, None)) or None
+        if p["max_speakers"] is not None and p["max_speakers"] < 1:
+            p["max_speakers"] = None
+        if not (math.isfinite(p["merge_similarity"]) and -1.0 <= p["merge_similarity"] <= 1.0) \
+                or not (math.isfinite(p["min_speaker_s"]) and p["min_speaker_s"] >= 0):
+            raise BadRequest("out of range: merge_similarity/min_speaker_s")
     else:
         p["step_ms"] = field(msg, "step_ms", int, 100)
         if p["step_ms"] < 1:
@@ -268,7 +283,7 @@ def fake_diarize(ctx, p):
     dur = fake_duration(p["audio"])
     rid, delay = ctx.id, fake_delay_s()
     n_turns = math.ceil(dur / 15.0)
-    nspk = 3 if (p["num_clusters"] or 0) >= 3 else 2
+    nspk = 3 if (p["max_speakers"] or 0) >= 3 else 2
     send({"type": "progress", "id": rid, "stage": "diarize_segmentation"})
     turns = []
     for i in range(n_turns):
@@ -461,6 +476,114 @@ def real_transcribe(ctx, p):
           "language": info.language})
 
 
+def unit(v):
+    """Vetor normalizado em L2 (lista de floats); norma zero devolve zeros."""
+    n = math.sqrt(sum(x * x for x in v))
+    return [x / n for x in v] if n > 0 else [0.0] * len(v)
+
+
+def cosine(a, b):
+    return sum(x * y for x, y in zip(unit(a), unit(b)))
+
+
+def pick_turns(turns, k=EMB_TURNS, min_s=EMB_MIN_TURN_S):
+    """Amostra de um grupo para o centroide: até `k` dos turnos mais longos com >= `min_s` s; sem nenhum, o mais longo."""
+    turns = sorted(turns, key=lambda t: (-(t[1] - t[0]), t[0]))
+    long = [t for t in turns if t[1] - t[0] >= min_s]
+    return long[:k] or turns[:1]
+
+
+def merge_voices(speech, cents, merge_similarity=MERGE_SIMILARITY, min_speaker_s=MIN_SPEAKER_S, max_speakers=None):
+    """Junta os grupos brutos do clustering que são a mesma voz. `speech[i]` = segundos de fala do grupo i,
+    `cents[i]` = centroide (qualquer norma; usa o cosseno). Do maior para o menor (empate: índice menor), cada grupo
+    junta ao mais parecido dos já mantidos se cos >= `merge_similarity` OU se tem < `min_speaker_s` de fala; senão vira
+    pessoa própria (o maior grupo sempre fica). Centroides NÃO são recalculados na junção (o resultado depende pouco
+    da ordem). Depois, com mais de `max_speakers` mantidos, o de menos fala (somando o que já absorveu) junta ao mais
+    parecido dos outros, até caber.
+    Devolve {"labels": rótulo final por grupo (0 = quem mais fala), "kept": nº final, "rows": [[fala, junta_em, cos]]
+    na ordem decrescente de fala; `junta_em` = posição dessa lista do grupo que ficou com ele (None = é pessoa)}."""
+    n = len(speech)
+    order = sorted(range(n), key=lambda i: (-speech[i], i))
+    parent = list(range(n))
+    sim = [None] * n
+    kept = []
+
+    def best_of(i, pool):
+        """(cosseno, grupo) do mais parecido de `pool`; empate: o primeiro (o de mais fala)."""
+        best = None
+        for k in pool:
+            c = cosine(cents[i], cents[k])
+            if best is None or c > best[0]:
+                best = (c, k)
+        return best
+
+    for i in order:
+        if kept:
+            c, k = best_of(i, kept)
+            sim[i] = c
+            if c >= merge_similarity or speech[i] < min_speaker_s:
+                parent[i] = k
+                continue
+        kept.append(i)
+
+    def root(i):
+        while parent[i] != i:
+            i = parent[i]
+        return i
+
+    total = {k: 0.0 for k in kept}
+    for i in range(n):
+        total[root(i)] += speech[i]
+    if max_speakers:
+        while len(kept) > max_speakers:
+            small = min(kept, key=lambda k: (total[k], -order.index(k)))
+            pool = [k for k in kept if k != small]
+            c, k = best_of(small, pool)
+            sim[small], parent[small] = c, k
+            total[k] += total.pop(small)
+            kept = pool
+    ranked = sorted(kept, key=lambda k: (-total[k], order.index(k)))
+    label = {k: r for r, k in enumerate(ranked)}
+    pos = {i: r for r, i in enumerate(order)}
+    rows = [[speech[i], None if root(i) == i else pos[root(i)], sim[i]] for i in order]
+    return {"labels": [label[root(i)] for i in range(n)], "kept": len(kept), "rows": rows}
+
+
+def cluster_centroids(ctx, sherpa_onnx, p, audio, groups):
+    """Centroide por grupo: média normalizada dos embeddings normalizados dos turnos amostrados (`pick_turns`, cada um
+    cortado em `EMB_MAX_TURN_S` pelo meio). `groups` = lista de listas de (início, fim). None = cancelado."""
+    import numpy as np
+    rid = ctx.id
+    picks = [pick_turns(g) for g in groups]
+    total = sum(len(g) for g in picks)
+    ex = sherpa_onnx.SpeakerEmbeddingExtractor(
+        sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=p["emb_model"], num_threads=max(1, p["threads"])))
+    done, last, cents = 0, 0.0, []
+    for g in picks:
+        acc = None
+        for a, b in g:
+            if ctx.cancelled():
+                return None
+            mid, half = (a + b) / 2.0, min(b - a, EMB_MAX_TURN_S) / 2.0
+            chunk = audio[max(0, int(round((mid - half) * SAMPLE_RATE))):int(round((mid + half) * SAMPLE_RATE))]
+            if len(chunk):
+                st = ex.create_stream()
+                st.accept_waveform(sample_rate=SAMPLE_RATE, waveform=chunk)
+                st.input_finished()
+                if ex.is_ready(st):
+                    e = np.asarray(ex.compute(st), dtype=np.float64)
+                    n = np.linalg.norm(e)
+                    if n > 0:
+                        acc = e / n if acc is None else acc + e / n
+            done += 1
+            now = time.monotonic()
+            if now - last >= 0.2 or done >= total:
+                last = now
+                send({"type": "progress", "id": rid, "stage": "diarize_embedding", "done": done, "total": total})
+        cents.append(unit(acc.tolist()) if acc is not None else [])
+    return cents
+
+
 def real_diarize(ctx, p):
     rid = ctx.id
     for key in ("seg_model", "emb_model"):
@@ -472,14 +595,14 @@ def real_diarize(ctx, p):
         send({"type": "result", "id": rid, "turns": [], "speakers": 0})
         return
     import sherpa_onnx
-    nc = p["num_clusters"] if p["num_clusters"] and p["num_clusters"] > 0 else -1
     config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
         segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
             pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(
                 model=p["seg_model"], window_shift_ratio=0.1),
             num_threads=max(1, p["threads"])),
         embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=p["emb_model"], num_threads=max(1, p["threads"])),
-        clustering=sherpa_onnx.FastClusteringConfig(num_clusters=nc, threshold=p["threshold"]),
+        # nunca força a contagem: o limiar decide e `merge_voices` junta o que é a mesma voz (#25)
+        clustering=sherpa_onnx.FastClusteringConfig(num_clusters=-1, threshold=p["threshold"]),
         min_duration_on=0.3, min_duration_off=0.5)
     if not config.validate():
         raise WorkerError("model_missing", "invalid diarization config (check model files)")
@@ -502,9 +625,22 @@ def real_diarize(ctx, p):
     result = sd.process(audio, callback=on_progress)
     if state["aborted"] or ctx.cancelled():
         return send_cancelled(rid, 0)
-    turns = [{"start": round(r.start, 3), "end": round(r.end, 3), "speaker": int(r.speaker)}
-             for r in result.sort_by_start_time()]
-    send({"type": "result", "id": rid, "turns": turns, "speakers": len({t["speaker"] for t in turns})})
+    raw = [(round(r.start, 3), round(r.end, 3), int(r.speaker)) for r in result.sort_by_start_time()]
+    ids = sorted({s for _, _, s in raw})
+    groups = [[(a, b) for a, b, s in raw if s == c] for c in ids]
+    speech = [round(sum(b - a for a, b in g), 3) for g in groups]
+    if len(ids) > 1:
+        cents = cluster_centroids(ctx, sherpa_onnx, p, audio, groups)
+        if cents is None:
+            return send_cancelled(rid, 0)
+        merged = merge_voices(speech, cents, p["merge_similarity"], p["min_speaker_s"], p["max_speakers"])
+    else:
+        merged = {"labels": [0] * len(ids), "kept": len(ids), "rows": [[s, None, None] for s in speech]}
+    label = dict(zip(ids, merged["labels"]))
+    turns = [{"start": a, "end": b, "speaker": label[s]} for a, b, s in raw]
+    rows = [[round(sp, 1), into, None if c is None else round(c, 3)] for sp, into, c in merged["rows"]]
+    send({"type": "result", "id": rid, "turns": turns, "speakers": merged["kept"],
+          "merge": {"raw": len(ids), "final": merged["kept"], "clusters": rows}})
 
 
 def real_energy(ctx, p):

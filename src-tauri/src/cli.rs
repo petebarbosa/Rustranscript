@@ -191,7 +191,7 @@ pub struct TranscribeArgs {
     /// Idioma falado: auto, pt, en ou es (padrão: o da chamada ou da configuração)
     #[arg(long)]
     language: Option<String>,
-    /// Quantas pessoas do outro lado (melhora a separação de vozes)
+    /// Máximo de pessoas na chamada; só quem fala vira falante (padrão: conta pela voz)
     #[arg(long = "speakers")]
     expected_speakers: Option<i64>,
     /// Não remove o eco do outro lado captado pelo microfone
@@ -254,7 +254,7 @@ pub struct RecordArgs {
     client: Option<String>,
     #[arg(long)]
     title: Option<String>,
-    /// Quantas pessoas do outro lado (melhora a separação de vozes)
+    /// Máximo de pessoas na chamada; só quem fala vira falante (padrão: conta pela voz)
     #[arg(long = "speakers")]
     expected_speakers: Option<i64>,
     /// Idioma da transcrição (pt, en, es...)

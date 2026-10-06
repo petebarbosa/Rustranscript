@@ -17,6 +17,21 @@ import { renderRecord } from './views/record'
 import { renderQueue } from './views/queue'
 import { renderBar } from './views/bar'
 
+// Sem o menu de contexto padrão do WebKit ("Copiar link", "Abrir link", "Recarregar", "Inspecionar"...): numa app de
+// desktop só aparecem ações da própria app. Fica o menu nativo (recortar/copiar/colar) onde se edita texto: campos de
+// texto, textareas e blocos `contenteditable` (o modo de edição da transcrição). Ctrl+C não passa por aqui, então
+// copiar texto selecionado continua valendo. Este módulo roda nas duas janelas (principal e mini barra).
+const TEXT_INPUT = new Set(['text', 'search', 'url', 'tel', 'email', 'password', 'number'])
+function editavel(el: Element | null): boolean {
+  const alvo = el?.closest('input, textarea, [contenteditable]')
+  if (!alvo) return false
+  if (alvo instanceof HTMLInputElement) return TEXT_INPUT.has(alvo.type)
+  return alvo instanceof HTMLTextAreaElement || (alvo as HTMLElement).isContentEditable
+}
+document.addEventListener('contextmenu', e => {
+  if (!editavel(e.target instanceof Element ? e.target : null)) e.preventDefault()
+})
+
 let view: View = {}
 const app = document.getElementById('app')!
 

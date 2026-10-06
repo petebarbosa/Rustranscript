@@ -3269,7 +3269,7 @@ dependencies = [
 
 [[package]]
 name = "rstt-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bzip2",
@@ -3297,7 +3297,7 @@ dependencies = [
 
 [[package]]
 name = "rstt-recorder"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "hound",
@@ -3389,7 +3389,7 @@ dependencies = [
 
 [[package]]
 name = "rustranscript"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",

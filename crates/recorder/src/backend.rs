@@ -12,7 +12,7 @@ pub const SAMPLE_RATE: u32 = 16_000;
 pub const CHANNELS: u16 = 1;
 
 /// Variável de ambiente que troca o backend real pelo `FakeBackend` (`1` = tempo real, `fast` = sem pausas).
-pub const FAKE_ENV: &str = "RSTT_FAKE_AUDIO";
+pub const FAKE_ENV: &str = "TARY_FAKE_AUDIO";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceInfo {
@@ -88,7 +88,7 @@ impl CaptureBackend for UnavailableBackend {
     }
 }
 
-/// Backend da execução atual: `FakeBackend` se `RSTT_FAKE_AUDIO` estiver definida
+/// Backend da execução atual: `FakeBackend` se `TARY_FAKE_AUDIO` estiver definida
 /// (`fast` = sem pausas; qualquer outro valor não vazio e diferente de `0` = tempo real), senão o
 /// real da plataforma (libpulse no Linux).
 pub fn default_backend() -> Arc<dyn CaptureBackend> {

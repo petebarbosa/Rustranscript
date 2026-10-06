@@ -12,7 +12,7 @@ use crate::Result;
 /// Picos por segundo guardados. Fino o bastante para os cortes (issue #23) e para a UI reduzir à largura da barra.
 pub const PEAKS_PER_S: u32 = 50;
 pub const PEAKS_FILE: &str = "peaks.bin";
-const MAGIC: &[u8; 8] = b"RSTTPK01";
+const MAGIC: &[u8; 8] = b"TARYPK01";
 const BLOCK: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

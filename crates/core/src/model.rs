@@ -151,7 +151,7 @@ pub struct CallDetail {
     pub transcripts: Vec<TranscriptInfo>,
     pub speakers: Vec<SpeakerInfo>,
     pub blocks: Vec<BlockInfo>,
-    /// Blocos excluídos da versão (com `deleted_at`), para `rstt edit restore` achar o `seq`.
+    /// Blocos excluídos da versão (com `deleted_at`), para `tary edit restore` achar o `seq`.
     pub deleted_blocks: Vec<BlockInfo>,
     pub chapters: Vec<Chapter>,
     pub audio: AudioInfo,

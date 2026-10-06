@@ -20,7 +20,7 @@ pub mod staging;
 /// Variável de ambiente de teste: `1` = shell usa o `ProcessEngine` com `worker.py --fake` (Python do
 /// sistema, sem runtime nem modelos; instantâneo); `slow` = idem com 300 ms entre segmentos (testes de
 /// cancelar/matar). Valor que é um caminho existente = esse interpretador em vez de `python3`.
-pub const FAKE_WORKER_ENV: &str = "RSTT_FAKE_WORKER";
+pub const FAKE_WORKER_ENV: &str = "TARY_FAKE_WORKER";
 
 /// Dentro de um AppImage, o runtime exporta `PYTHONHOME`/`PYTHONPATH` e põe as pastas do pacote na frente de
 /// `PATH`/`LD_LIBRARY_PATH`: o Python do runtime herdaria isso e morreria antes do `hello` ("No module named

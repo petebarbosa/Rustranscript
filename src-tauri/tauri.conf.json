@@ -1,9 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Rustranscript",
-  "mainBinaryName": "rstt",
+  "productName": "Transcriptary",
+  "mainBinaryName": "tary",
   "version": "0.2.2",
-  "identifier": "io.github.petebarbosa.rustranscript",
+  "identifier": "io.github.petebarbosa.transcriptary",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://127.0.0.1:5173",
@@ -16,7 +16,7 @@
       {
         "label": "main",
         "visible": false,
-        "title": "Rustranscript",
+        "title": "Transcriptary",
         "width": 1200,
         "height": 820,
         "minWidth": 720,

@@ -9,7 +9,7 @@
 //!   confere que nenhum evento de posição cai dentro de um corte. Com `PULSE_SINK=<null sink>` e `parec` no monitor
 //!   dá para ver na saída o trecho cortado ausente.
 //!
-//! `cargo build --release -p rstt-core --example player_probe`
+//! `cargo build --release -p tary-core --example player_probe`
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

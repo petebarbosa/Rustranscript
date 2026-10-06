@@ -61,10 +61,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: v__VERSION__
-          releaseName: Rustranscript v__VERSION__
+          releaseName: Transcriptary v__VERSION__
           releaseBody: |
             Download the `.AppImage`, make it executable (`chmod +x`) and run it.
-            See the README for the `rstt` command and the first-run setup.
+            See the README for the `tary` command and the first-run setup.
           releaseDraft: true
           prerelease: false
           uploadUpdaterJson: false

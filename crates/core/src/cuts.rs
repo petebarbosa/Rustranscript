@@ -6,7 +6,7 @@
 //! trecho a que está ligada). Cortes MANUAIS novos só ocupam o que os manuais já salvos não cobrem (a lista
 //! fica sem sobreposição); um pedido que já está todo coberto vira `skipped`.
 //!
-//! Regras, todas dentro de UM lote do histórico (`rstt undo` desfaz o lote inteiro):
+//! Regras, todas dentro de UM lote do histórico (`tary undo` desfaz o lote inteiro):
 //! - salvar cortes manuais (`cut_add`): grava os cortes e exclui todo trecho vivo da versão ativa com pelo menos
 //!   metade da duração dentro da união de TODOS os cortes (`MIN_COVERAGE`);
 //! - excluir trechos (`delete`): cria um corte por trecho, ligado a ele; restaurar (`restore`) remove os cortes

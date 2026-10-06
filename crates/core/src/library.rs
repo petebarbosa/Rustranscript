@@ -271,7 +271,7 @@ impl Library {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Blocos excluídos da versão, com o `seq` que tinham (`rstt edit restore` usa esse número).
+    /// Blocos excluídos da versão, com o `seq` que tinham (`tary edit restore` usa esse número).
     pub fn deleted_blocks(&self, transcript_id: i64) -> Result<Vec<BlockInfo>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {BLOCK_COLS} FROM blocks WHERE transcript_id = ?1 AND deleted_at IS NOT NULL ORDER BY seq"

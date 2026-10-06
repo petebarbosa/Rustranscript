@@ -143,11 +143,6 @@ pub fn error_prefix(lang: Lang, code: &str) -> &'static str {
     }
 }
 
-/// Aviso de migração pendente com a app antiga aberta (CLI no stderr, GUI num diálogo).
-pub fn legacy_running_message(lang: Lang, blocked: &core_lib::paths::LegacyRunning) -> String {
-    msg(lang, "legacy_running").replace("{old}", &blocked.old_data.display().to_string())
-}
-
 /// Mensagem traduzida; ausente no idioma → inglês.
 pub fn msg(lang: Lang, key: &str) -> &'static str {
     match lookup(lang, key) {
@@ -159,9 +154,6 @@ pub fn msg(lang: Lang, key: &str) -> &'static str {
 fn lookup(lang: Lang, key: &str) -> &'static str {
     use Lang::*;
     match (key, lang) {
-        ("legacy_running", PtBr) => "Há dados da versão anterior do app em {old} e ela ainda está aberta. Feche-a e abra o Rustranscript de novo para migrar os dados.",
-        ("legacy_running", EnUs) => "Data from the previous version of the app is in {old} and it is still running. Close it and open Rustranscript again to migrate the data.",
-        ("legacy_running", Es419) => "Hay datos de la versión anterior de la app en {old} y sigue abierta. Ciérrala y abre Rustranscript de nuevo para migrar los datos.",
         ("nothing_to_undo", PtBr) => "nada para desfazer",
         ("nothing_to_undo", EnUs) => "nothing to undo",
         ("nothing_to_undo", Es419) => "nada para deshacer",

@@ -1,10 +1,10 @@
 # Maintainer: petebarbosa <https://github.com/petebarbosa>
-pkgname=rustranscript
+pkgname=transcriptary
 pkgver=0.2.2
 pkgrel=1
 pkgdesc='Record and transcribe your meetings locally, with speaker separation'
 arch=('x86_64')
-url='https://github.com/petebarbosa/Rustranscript'
+url='https://github.com/petebarbosa/Transcriptary'
 license=('MIT')
 depends=('webkit2gtk-4.1' 'gtk3' 'libpulse' 'libayatana-appindicator' 'glib2' 'dbus' 'glibc' 'gcc-libs' 'hicolor-icon-theme')
 makedepends=('cargo' 'nodejs' 'npm' 'git')
@@ -14,14 +14,14 @@ source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('8f4d5fef57cbe37b1aa6410a81bb204c39521e718a8a42f456f1c1ad30b69eb6')
 
 prepare() {
-  cd "Rustranscript-$pkgver"
+  cd "Transcriptary-$pkgver"
   export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
   npm ci --no-audit --no-fund
 }
 
 build() {
-  cd "Rustranscript-$pkgver"
+  cd "Transcriptary-$pkgver"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   # Frontend is built by tauri's beforeBuildCommand; no AppImage here, just the binary.
@@ -29,20 +29,20 @@ build() {
 }
 
 package() {
-  cd "Rustranscript-$pkgver"
-  install -Dm755 target/release/rstt "$pkgdir/usr/bin/rstt"
-  install -Dm644 packaging/linux/rustranscript.desktop \
-    "$pkgdir/usr/share/applications/rustranscript.desktop"
+  cd "Transcriptary-$pkgver"
+  install -Dm755 target/release/tary "$pkgdir/usr/bin/tary"
+  install -Dm644 packaging/linux/transcriptary.desktop \
+    "$pkgdir/usr/share/applications/transcriptary.desktop"
 
   local size
   for size in 32 128; do
     install -Dm644 "src-tauri/icons/${size}x${size}.png" \
-      "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/rustranscript.png"
+      "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/transcriptary.png"
   done
   install -Dm644 src-tauri/icons/128x128@2x.png \
-    "$pkgdir/usr/share/icons/hicolor/256x256/apps/rustranscript.png"
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/transcriptary.png"
   install -Dm644 src-tauri/icons/icon.png \
-    "$pkgdir/usr/share/icons/hicolor/512x512/apps/rustranscript.png"
+    "$pkgdir/usr/share/icons/hicolor/512x512/apps/transcriptary.png"
 
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

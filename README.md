@@ -1,4 +1,4 @@
-# Rustranscript
+# Transcriptary
 
 Records your calls, transcribes them and tells the speakers apart. Everything
 happens on your machine: audio and text never leave your computer.
@@ -11,10 +11,10 @@ Linux only (PulseAudio or PipeWire).
 
 **AppImage (any distro)**
 
-1. Download `Rustranscript_*.AppImage` from the [Releases](https://github.com/petebarbosa/Rustranscript/releases) page.
-2. `chmod +x Rustranscript_*.AppImage`, then run it.
-3. Optional, to get the `rstt` command in your terminal:
-   `ln -s /path/to/Rustranscript.AppImage ~/.local/bin/rstt`
+1. Download `Transcriptary_*.AppImage` from the [Releases](https://github.com/petebarbosa/Transcriptary/releases) page.
+2. `chmod +x Transcriptary_*.AppImage`, then run it.
+3. Optional, to get the `tary` command in your terminal:
+   `ln -s /path/to/Transcriptary.AppImage ~/.local/bin/tary`
 
 **Arch Linux**
 
@@ -26,28 +26,28 @@ cd packaging/arch && makepkg -si
 
 Transcription needs an engine and speech models (about 1.7 GB). They are not
 bundled: open **Queue** (or Settings) and click **Download and install**
-(*Baixar e instalar* in pt-BR), or run `rstt setup install`. This happens once.
+(*Baixar e instalar* in pt-BR), or run `tary setup install`. This happens once.
 Recording works without it, and finished recordings wait in the queue.
 
 ## Record
 
 - Press **Ctrl+Alt+R** to start and stop (change it in Settings).
-- Or from a terminal: `rstt record start` and `rstt record stop`
-  (`rstt record toggle` does both). `rstt --help` lists everything.
+- Or from a terminal: `tary record start` and `tary record stop`
+  (`tary record toggle` does both). `tary --help` lists everything.
 - Wayland (e.g. Hyprland): global shortcuts are not available to apps. Open
   **Settings**, copy the snippet shown there into your compositor config, and
-  it will call `rstt record toggle`.
+  it will call `tary record toggle`.
 
 Your microphone and the other side of the call are recorded separately, which
 is how speakers are told apart.
 
 ## Agent skill
 
-To let a coding agent drive the app, symlink the skill: `ln -s "$PWD/skills/rstt" ~/.claude/skills/rstt` (or into `~/.agents/skills/`).
+To let a coding agent drive the app, symlink the skill: `ln -s "$PWD/skills/tary" ~/.claude/skills/tary` (or into `~/.agents/skills/`).
 
 ## Where your data lives
 
-`~/.local/share/rustranscript` holds recordings, transcripts and the
+`~/.local/share/transcriptary` holds recordings, transcripts and the
 transcription engine. Remove the folder to erase everything.
 
 ## Build from source
@@ -57,7 +57,7 @@ GTK 3 and libpulse.
 
 ```
 npm ci
-npx tauri build --no-bundle   # binary at target/release/rstt
+npx tauri build --no-bundle   # binary at target/release/tary
 npx tauri build               # AppImage in target/release/bundle/appimage/
 ```
 

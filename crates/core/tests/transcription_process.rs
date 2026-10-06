@@ -1,5 +1,5 @@
 //! `ProcessEngine` com o `worker.py --fake` de verdade (opt-in: `cargo test -- --ignored`; precisa de `python3`
-//! no PATH, ou do interpretador indicado em `RSTT_FAKE_WORKER`). Sem rede, sem modelos, áudio sintético.
+//! no PATH, ou do interpretador indicado em `TARY_FAKE_WORKER`). Sem rede, sem modelos, áudio sintético.
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -25,7 +25,7 @@ fn flac(dir: &Path, name: &str, secs: u32) -> PathBuf {
 }
 
 fn python() -> PathBuf {
-    std::env::var("RSTT_FAKE_WORKER").ok().map(PathBuf::from).filter(|p| p.is_file()).unwrap_or_else(|| PathBuf::from("python3"))
+    std::env::var("TARY_FAKE_WORKER").ok().map(PathBuf::from).filter(|p| p.is_file()).unwrap_or_else(|| PathBuf::from("python3"))
 }
 
 fn engine(dir: &Path) -> ProcessEngine {
@@ -175,7 +175,7 @@ fn cooperative_cancel_keeps_the_worker_and_hard_cancel_restarts_it() {
     let dir = tempfile::tempdir().unwrap();
     let audio = flac(dir.path(), "sys", 60);
     // SAFETY: protegido por SERIAL; só este teste mexe nessa variável e os outros não rodam ao mesmo tempo.
-    unsafe { std::env::set_var("RSTT_FAKE_DELAY_MS", "150") };
+    unsafe { std::env::set_var("TARY_FAKE_DELAY_MS", "150") };
     let mut e = engine(dir.path());
     let pid = e.pid().unwrap();
     let mut seen = 0;
@@ -199,7 +199,7 @@ fn cooperative_cancel_keeps_the_worker_and_hard_cancel_restarts_it() {
         Terminal::Cancelled { .. } => assert_ne!(e.pid(), Some(pid)),
         Terminal::Result(_) => {} // terminou antes do primeiro evento: nada a cancelar
     }
-    unsafe { std::env::remove_var("RSTT_FAKE_DELAY_MS") };
+    unsafe { std::env::remove_var("TARY_FAKE_DELAY_MS") };
     let (_, r) = collect(&mut e, &diarize("w", &audio, None));
     assert!(r["turns"].is_array());
     e.shutdown();
@@ -221,9 +221,9 @@ fn killed_worker_is_reported_and_restarted_on_the_next_request() {
     assert_eq!(r["segments"], 4);
     assert_ne!(e.pid(), Some(pid));
     // queda no meio de um pedido
-    unsafe { std::env::set_var("RSTT_FAKE_DELAY_MS", "200") };
+    unsafe { std::env::set_var("TARY_FAKE_DELAY_MS", "200") };
     let mut e2 = engine(dir.path());
-    unsafe { std::env::remove_var("RSTT_FAKE_DELAY_MS") };
+    unsafe { std::env::remove_var("TARY_FAKE_DELAY_MS") };
     let pid2 = e2.pid().unwrap();
     let mut n = 0;
     let err = e2

@@ -69,7 +69,7 @@ impl Player {
         let duration_s = session.duration_s();
         let (tx, rx) = channel();
         let join = std::thread::Builder::new()
-            .name("rstt-player".into())
+            .name("tary-player".into())
             .spawn(move || Engine { session, opener, sink: None, state: PlayState::Paused, on_event, last_emit: Instant::now() }.run(rx))
             .map_err(Error::Io)?;
         Ok(Player { tx, join: Some(join), duration_s })

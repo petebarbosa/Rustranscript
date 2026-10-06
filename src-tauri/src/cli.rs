@@ -20,9 +20,9 @@ use crate::ipc::{self, Request};
 use crate::transcription;
 
 #[derive(Parser)]
-#[command(name = "rstt", version, about = "Gravação e transcrição de reuniões, local")]
+#[command(name = "tary", version, about = "Gravação e transcrição de reuniões, local")]
 pub struct Cli {
-    /// Diretório de dados (padrão: ~/.local/share/rustranscript ou $RSTT_DATA_DIR)
+    /// Diretório de dados (padrão: ~/.local/share/transcriptary ou $TARY_DATA_DIR)
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
     /// Idioma das mensagens: pt-BR, en-US, es-419
@@ -292,7 +292,7 @@ enum EditCmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Exclui blocos (exclusão lógica: o texto e o áudio ficam; `rstt edit restore` traz de volta)
+    /// Exclui blocos (exclusão lógica: o texto e o áudio ficam; `tary edit restore` traz de volta)
     Delete {
         call: String,
         /// Números dos blocos como em `show`
@@ -514,10 +514,6 @@ pub fn run(args: Vec<std::ffi::OsString>) -> i32 {
     if matches!(cli.cmd, Cmd::Gui) {
         crate::gui::run(cli.data_dir);
         return 0;
-    }
-    if let Err(blocked) = paths::migrate_legacy(cli.data_dir.as_deref()) {
-        eprintln!("rstt: {}", crate::i18n::legacy_running_message(cli.lang.as_deref().and_then(Lang::parse).unwrap_or_else(Lang::system), &blocked));
-        return 1;
     }
     let data_dir = paths::resolve_data_dir(cli.data_dir.as_deref());
     let mut lang = cli.lang.as_deref().and_then(Lang::parse);
@@ -1376,7 +1372,7 @@ mod tests {
 
     #[test]
     fn record_commands_parse() {
-        let p = |args: &[&str]| Cli::try_parse_from(std::iter::once("rstt").chain(args.iter().copied())).map(|c| c.cmd);
+        let p = |args: &[&str]| Cli::try_parse_from(std::iter::once("tary").chain(args.iter().copied())).map(|c| c.cmd);
         let Ok(Cmd::Record { what: RecordCmd::Start(a) }) =
             p(&["record", "start", "--library", "Empresa", "--client", "Cliente", "--title", "T", "--speakers", "2", "--mic", "off"])
         else {
@@ -1391,9 +1387,9 @@ mod tests {
         assert!(p(&["record", "start", "--client", "C"]).is_err(), "--client exige --library");
     }
 
-    /// Roda um comando como `rstt <args>` e devolve o JSON e o aviso para a app aberta.
+    /// Roda um comando como `tary <args>` e devolve o JSON e o aviso para a app aberta.
     fn run(app: &App, args: &[&str]) -> core_lib::Result<(Value, Option<Value>)> {
-        let argv = std::iter::once("rstt").chain(args.iter().copied());
+        let argv = std::iter::once("tary").chain(args.iter().copied());
         let cli = Cli::try_parse_from(argv).unwrap();
         match exec(app, cli.cmd, Lang::EnUs, false)? {
             Output::Json(v, c) => Ok((v, c)),
@@ -1472,7 +1468,7 @@ mod tests {
     }
 
     fn cmd(args: &[&str]) -> Cmd {
-        Cli::try_parse_from(std::iter::once("rstt").chain(args.iter().copied())).unwrap().cmd
+        Cli::try_parse_from(std::iter::once("tary").chain(args.iter().copied())).unwrap().cmd
     }
 
     fn rec_cmd(args: &[&str]) -> RecordCmd {
@@ -1602,7 +1598,7 @@ mod tests {
     }
 
     fn help_text(args: &[&str], lang: Lang) -> String {
-        let argv = std::iter::once("rstt").chain(args.iter().copied()).map(std::ffi::OsString::from).collect();
+        let argv = std::iter::once("tary").chain(args.iter().copied()).map(std::ffi::OsString::from).collect();
         match parse_localized(argv, lang) {
             Err(e) if !e.use_stderr() => e.render().to_string(),
             _ => panic!("esperava a ajuda de {args:?}"),
@@ -1631,20 +1627,20 @@ mod tests {
         assert_eq!(Lang::parse("pt_BR.UTF-8"), Some(Lang::PtBr));
         assert_eq!(Lang::parse("es_MX.UTF-8"), Some(Lang::Es419));
         // o comando continua o mesmo: dá para executar com a ajuda localizada
-        let cli = parse_localized(["rstt", "queue", "list"].map(Into::into).to_vec(), Lang::Es419).unwrap();
+        let cli = parse_localized(["tary", "queue", "list"].map(Into::into).to_vec(), Lang::Es419).unwrap();
         assert!(matches!(cli.cmd, Cmd::Queue { what: Some(QueueCmd::List) }));
     }
 
     #[test]
     fn lang_flag_is_read_before_help() {
         let args = |a: &[&str]| a.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
-        assert_eq!(help_lang(&args(&["rstt", "--lang", "es-419", "--help"])), Lang::Es419);
-        assert_eq!(help_lang(&args(&["rstt", "queue", "--lang=pt-BR", "--help"])), Lang::PtBr);
-        assert_eq!(help_lang(&args(&["rstt", "--lang", "en", "glossary", "--help"])), Lang::EnUs);
+        assert_eq!(help_lang(&args(&["tary", "--lang", "es-419", "--help"])), Lang::Es419);
+        assert_eq!(help_lang(&args(&["tary", "queue", "--lang=pt-BR", "--help"])), Lang::PtBr);
+        assert_eq!(help_lang(&args(&["tary", "--lang", "en", "glossary", "--help"])), Lang::EnUs);
         // depois de `--` já não é opção
-        assert_eq!(help_lang(&args(&["rstt", "--", "--lang", "es"])), Lang::system());
+        assert_eq!(help_lang(&args(&["tary", "--", "--lang", "es"])), Lang::system());
         // idioma desconhecido em --lang: o do sistema
-        assert_eq!(help_lang(&args(&["rstt", "--lang", "de", "--help"])), Lang::system());
+        assert_eq!(help_lang(&args(&["tary", "--lang", "de", "--help"])), Lang::system());
     }
 
     #[test]
@@ -1663,7 +1659,7 @@ mod tests {
 
     #[test]
     fn transcription_commands_parse() {
-        let p = |args: &[&str]| Cli::try_parse_from(std::iter::once("rstt").chain(args.iter().copied())).map(|c| c.cmd);
+        let p = |args: &[&str]| Cli::try_parse_from(std::iter::once("tary").chain(args.iter().copied())).map(|c| c.cmd);
         let Ok(Cmd::Transcribe(a)) = p(&["transcribe", "call_2026-10-01_08-21-52", "--kind", "rediarize", "--language", "pt-BR", "--speakers", "2", "--no-bleed-filter"]) else {
             panic!("transcribe")
         };
@@ -1782,7 +1778,7 @@ mod tests {
         assert_eq!(d["cuts"].as_array().unwrap().len(), 1);
         let (l, _) = run(&app, &["cut", "list", call]).unwrap();
         assert_eq!((l[0]["t_start"].as_f64(), l[0]["duration_s"].as_f64()), (Some(b2.0 - 1.0), Some(b2.1 - b2.0 + 2.0)));
-        let argv = ["rstt", "show", call, "--text"];
+        let argv = ["tary", "show", call, "--text"];
         let Output::Text(t) = exec(&app, Cli::try_parse_from(argv).unwrap().cmd, Lang::EnUs, false).unwrap() else { panic!() };
         assert!(t.contains("Audio cuts") && !t.contains("#2 "), "{t}");
         // mm:ss também vale
@@ -1836,14 +1832,14 @@ mod tests {
         assert_eq!((seqs(&d, "blocks"), seqs(&d, "deleted_blocks")), (vec![2], vec![1, 3]));
         assert_eq!(d["words"], 1);
         // o texto corrido não traz os excluídos
-        let argv = ["rstt", "show", call, "--text"];
+        let argv = ["tary", "show", call, "--text"];
         let Output::Text(t) = exec(&app, Cli::try_parse_from(argv).unwrap().cmd, Lang::EnUs, false).unwrap() else { panic!() };
         assert!(t.contains("#2 ") && !t.contains("#1 ") && !t.contains("Gate Wei"), "{t}");
         assert!(run(&app, &["search", "voltou"]).unwrap().0.as_array().unwrap().is_empty());
         // o seq dos que sobraram não muda e o excluído não se edita
         assert!(run(&app, &["edit", "block", call, "1", "x"]).is_err_and(|e| e.code() == "conflict"));
         assert!(run(&app, &["edit", "delete", call, "9"]).is_err_and(|e| e.code() == "not_found"));
-        assert!(Cli::try_parse_from(["rstt", "edit", "delete", call]).is_err(), "sem número de bloco");
+        assert!(Cli::try_parse_from(["tary", "edit", "delete", call]).is_err(), "sem número de bloco");
 
         // repetir é idempotente; o histórico mostra a exclusão
         let (v, _) = run(&app, &["edit", "delete", call, "1"]).unwrap();

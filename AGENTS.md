@@ -1,12 +1,12 @@
-# Rustranscript
+# Transcriptary
 
 ## Agent skills
 
-Using the app (record, search, edit transcripts, glossary) through `rstt`: see `skills/rstt/SKILL.md`.
+Using the app (record, search, edit transcripts, glossary) through `tary`: see `skills/tary/SKILL.md`.
 
 ### Issue tracker
 
-Issues live in GitHub Issues (petebarbosa/Rustranscript), via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues live in GitHub Issues (petebarbosa/Transcriptary), via the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

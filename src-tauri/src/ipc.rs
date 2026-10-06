@@ -1,4 +1,4 @@
-//! Socket local do usuário (`$XDG_RUNTIME_DIR/rustranscript/ipc.sock`, modo 0600, nunca TCP).
+//! Socket local do usuário (`$XDG_RUNTIME_DIR/transcriptary/ipc.sock`, modo 0600, nunca TCP).
 //!
 //! Protocolo **requisição/resposta em JSON-linhas**, uma requisição por conexão: o cliente conecta,
 //! escreve uma linha, lê uma linha, fecha. O servidor atende cada conexão numa thread própria
@@ -28,7 +28,7 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 pub const START_WAIT: Duration = Duration::from_secs(10);
 /// Variável de ambiente que `spawn_gui` define: a GUI sobe **sem abrir a janela principal** (só tray e,
 /// se for o caso, a barra). Decisão de B (contrato 10.4): quem grava por atalho/CLI não quer a janela.
-pub const HIDDEN_ENV: &str = "RSTT_HIDDEN";
+pub const HIDDEN_ENV: &str = "TARY_HIDDEN";
 
 // ------------------------------------------------------------------ mensagens
 
@@ -161,7 +161,7 @@ pub fn request_on(sock: &Path, req: &Request, timeout: Duration) -> Result<Respo
 
 /// Sobe a GUI destacada, sem janela principal (`HIDDEN_ENV`) (`$APPIMAGE` se existir — dentro de um AppImage `current_exe` aponta para o
 /// squashfs, que some quando o processo sai —, senão `current_exe`), sem argumentos, com
-/// `RSTT_DATA_DIR` apontando para `data_dir`, stdio nulo e em grupo de processos próprio.
+/// `TARY_DATA_DIR` apontando para `data_dir`, stdio nulo e em grupo de processos próprio.
 /// Subir duas vezes é inofensivo: o plugin de instância única absorve a segunda.
 pub fn spawn_gui(data_dir: &Path) -> std::io::Result<()> {
     let mut cmd = detached()?;
@@ -169,8 +169,8 @@ pub fn spawn_gui(data_dir: &Path) -> std::io::Result<()> {
     cmd.spawn().map(|_| ())
 }
 
-/// `rstt` sem argumentos num terminal: abre a janela (`rstt gui`) solta e devolve o prompt na hora; os avisos do
-/// GTK/WebKit não sujam o terminal. Quem quiser os logs roda `rstt gui`, que fica em primeiro plano.
+/// `tary` sem argumentos num terminal: abre a janela (`tary gui`) solta e devolve o prompt na hora; os avisos do
+/// GTK/WebKit não sujam o terminal. Quem quiser os logs roda `tary gui`, que fica em primeiro plano.
 pub fn spawn_window_detached() -> std::io::Result<()> {
     let mut cmd = detached()?;
     cmd.arg("gui");

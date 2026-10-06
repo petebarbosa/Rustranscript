@@ -1,5 +1,5 @@
 //! Backend sintético: tons senoidais e silêncio, determinístico, sem dispositivos nem servidor de áudio.
-//! Ativado por `RSTT_FAKE_AUDIO=1` (tempo real) ou `=fast` (sem pausas) em `default_backend()`.
+//! Ativado por `TARY_FAKE_AUDIO=1` (tempo real) ou `=fast` (sem pausas) em `default_backend()`.
 //! Usado pelos testes e para desenvolver a UI/shell sem microfone. Nunca grava áudio real.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

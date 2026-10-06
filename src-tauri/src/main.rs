@@ -16,7 +16,7 @@ mod tray;
 
 fn main() {
     // Sem argumentos: abre a janela. Com argumentos: CLI, decidida antes de qualquer coisa do
-    // Tauri, para que `rstt list` com a app aberta não seja engolido pela instância única
+    // Tauri, para que `tary list` com a app aberta não seja engolido pela instância única
     // e funcione sem tela.
     let args: Vec<_> = std::env::args_os().collect();
     if args.len() <= 1 {

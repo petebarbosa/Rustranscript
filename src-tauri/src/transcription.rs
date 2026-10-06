@@ -62,7 +62,7 @@ pub(crate) struct TranscriptionStatus {
     /// instalação (runtime + modelos) em andamento: `phase` = `runtime` | `models`
     pub(crate) setup: SetupState,
     pub(crate) queue: QueueStatus,
-    /// `RSTT_FAKE_WORKER` ativo (a UI mostra um aviso discreto)
+    /// `TARY_FAKE_WORKER` ativo (a UI mostra um aviso discreto)
     pub(crate) fake_worker: bool,
 }
 
@@ -203,7 +203,7 @@ impl ProgressGate {
     }
 }
 
-/// Qual motor usar, a partir de `RSTT_FAKE_WORKER`: vazio/ausente = real; `1`/`slow` = `worker.py --fake`
+/// Qual motor usar, a partir de `TARY_FAKE_WORKER`: vazio/ausente = real; `1`/`slow` = `worker.py --fake`
 /// com o `python3` do sistema; caminho existente = esse interpretador (o `slow` é lido pelo próprio worker).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum EngineChoice {
@@ -222,7 +222,7 @@ pub(crate) fn engine_choice(env: Option<&str>) -> EngineChoice {
     }
 }
 
-/// `RSTT_FAKE_WORKER` ativo (valor não vazio).
+/// `TARY_FAKE_WORKER` ativo (valor não vazio).
 pub(crate) fn fake_env() -> Option<String> {
     std::env::var(FAKE_WORKER_ENV).ok().filter(|v| !v.trim().is_empty())
 }

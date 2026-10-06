@@ -493,29 +493,8 @@ fn glossary_prompt_terms(state: State<AppState>, library_id: i64, client_id: Opt
     })
 }
 
-/// Migração pendente com a app antiga aberta: a GUI não tem stderr visível, então mostra a mensagem num diálogo
-/// nativo e sai (código 1) quando ele fecha, sem abrir o banco nem criar o diretório de dados novo.
-fn legacy_running_dialog(context: tauri::Context<tauri::Wry>, message: String) -> ! {
-    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-    eprintln!("rstt: {message}");
-    let app = tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .setup(move |app| {
-            app.dialog().message(message).title("Rustranscript").kind(MessageDialogKind::Error).show(|_| std::process::exit(1));
-            Ok(())
-        })
-        .build(context)
-        .expect("error while building tauri application");
-    app.run(|_, _| {});
-    std::process::exit(1)
-}
-
 pub fn run(data_dir: Option<PathBuf>) {
-    // o contexto (assets embutidos) é gerado uma vez só, para o app de verdade ou para o diálogo de migração
     let context = tauri::generate_context!();
-    if let Err(blocked) = paths::migrate_legacy(data_dir.as_deref()) {
-        legacy_running_dialog(context, crate::i18n::legacy_running_message(Lang::system(), &blocked));
-    }
     let data_dir = paths::resolve_data_dir(data_dir.as_deref());
     let app = match App::open(&data_dir) {
         Ok(a) => a,

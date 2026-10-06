@@ -11,7 +11,7 @@
 //! - **Janela principal fechada, só finalizando**: não sai e não pergunta — a janela só esconde (a
 //!   conversão segue). Sair de verdade é o item "Sair" do tray (que confirma). `RunEvent::ExitRequested`
 //!   sem código (última janela fechada) é impedido enquanto ocupado.
-//! - **Início sem janela**: `ipc::spawn_gui` define `RSTT_HIDDEN`; a janela principal (criada
+//! - **Início sem janela**: `ipc::spawn_gui` define `TARY_HIDDEN`; a janela principal (criada
 //!   invisível em `tauri.conf.json`) só é mostrada no `setup` se a variável não existir.
 //! - **Segunda abertura**: gravando → mostra a barra; senão traz a janela principal para a frente.
 use std::sync::mpsc;

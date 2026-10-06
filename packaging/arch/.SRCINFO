@@ -1,8 +1,8 @@
-pkgbase = rustranscript
+pkgbase = transcriptary
 	pkgdesc = Record and transcribe your meetings locally, with speaker separation
 	pkgver = 0.2.2
 	pkgrel = 1
-	url = https://github.com/petebarbosa/Rustranscript
+	url = https://github.com/petebarbosa/Transcriptary
 	arch = x86_64
 	license = MIT
 	makedepends = cargo
@@ -21,7 +21,7 @@ pkgbase = rustranscript
 	optdepends = xdg-utils: open links and folders from the app
 	options = !lto
 	options = !debug
-	source = rustranscript-0.2.2.tar.gz::https://github.com/petebarbosa/Rustranscript/archive/refs/tags/v0.2.2.tar.gz
+	source = transcriptary-0.2.2.tar.gz::https://github.com/petebarbosa/Transcriptary/archive/refs/tags/v0.2.2.tar.gz
 	sha256sums = 8f4d5fef57cbe37b1aa6410a81bb204c39521e718a8a42f456f1c1ad30b69eb6
 
-pkgname = rustranscript
+pkgname = transcriptary

@@ -53,7 +53,7 @@ pub struct AudioDeletion {
     pub deleted_at: Option<String>,
 }
 
-/// Chamada com áudio ocupando espaço (lista da tela de armazenamento e `rstt audio list`).
+/// Chamada com áudio ocupando espaço (lista da tela de armazenamento e `tary audio list`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AudioEntry {
     pub library_id: i64,

@@ -1,20 +1,20 @@
 [package]
-name = "rustranscript"
+name = "transcriptary"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Record and transcribe your meetings locally"
 
 [[bin]]
-name = "rstt"
+name = "tary"
 path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
-rstt-core = { path = "../crates/core" }
-rstt-recorder = { path = "../crates/recorder" }
+tary-core = { path = "../crates/core" }
+tary-recorder = { path = "../crates/recorder" }
 tauri = { version = "2.12", features = ["tray-icon", "image-png"] }
 tauri-plugin-global-shortcut = "2.4"
 tauri-plugin-single-instance = "2.5"

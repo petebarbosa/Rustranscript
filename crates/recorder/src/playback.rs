@@ -1,5 +1,5 @@
 //! Saída de áudio do player (issue #22): o espelho da captura. Linux = libpulse (`pulse.rs`, o mesmo servidor
-//! da gravação); testes e `RSTT_FAKE_AUDIO` = `FakeSink`, que só guarda as amostras. O motor do player (no
+//! da gravação); testes e `TARY_FAKE_AUDIO` = `FakeSink`, que só guarda as amostras. O motor do player (no
 //! núcleo) só conhece estes traits.
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -27,7 +27,7 @@ pub trait PlaybackSink {
 /// Abre a saída para um áudio de `rate` Hz mono. Chamado na thread do player.
 pub type SinkOpener = Arc<dyn Fn(u32) -> Result<Box<dyn PlaybackSink>> + Send + Sync>;
 
-/// Saída da execução atual: `FakeSink` com `RSTT_FAKE_AUDIO` definida (sem som, em tempo real — a UI e os testes
+/// Saída da execução atual: `FakeSink` com `TARY_FAKE_AUDIO` definida (sem som, em tempo real — a UI e os testes
 /// de ponta a ponta andam como se tocasse), senão o libpulse.
 pub fn default_sink_opener() -> SinkOpener {
     if std::env::var(FAKE_ENV).ok().is_some_and(|v| !v.is_empty() && v != "0") {

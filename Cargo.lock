@@ -3289,49 +3289,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rstt-core"
-version = "0.2.2"
-dependencies = [
- "anyhow",
- "bzip2",
- "chrono",
- "claxon",
- "deunicode",
- "directories",
- "flacenc",
- "flate2",
- "hound",
- "libc",
- "md-5",
- "num_cpus",
- "regex",
- "rstt-recorder",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "symphonia",
- "tar",
- "tempfile",
- "thiserror 2.0.21",
- "ureq",
-]
-
-[[package]]
-name = "rstt-recorder"
-version = "0.2.2"
-dependencies = [
- "chrono",
- "hound",
- "libpulse-binding",
- "libpulse-simple-binding",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "rusqlite"
 version = "0.40.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3407,26 +3364,6 @@ dependencies = [
  "ring",
  "rustls-pki-types",
  "untrusted",
-]
-
-[[package]]
-name = "rustranscript"
-version = "0.2.2"
-dependencies = [
- "anyhow",
- "clap",
- "rstt-core",
- "rstt-recorder",
- "serde",
- "serde_json",
- "sys-locale",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-global-shortcut",
- "tauri-plugin-opener",
- "tauri-plugin-single-instance",
- "tempfile",
 ]
 
 [[package]]
@@ -4074,6 +4011,49 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
+name = "tary-core"
+version = "0.2.2"
+dependencies = [
+ "anyhow",
+ "bzip2",
+ "chrono",
+ "claxon",
+ "deunicode",
+ "directories",
+ "flacenc",
+ "flate2",
+ "hound",
+ "libc",
+ "md-5",
+ "num_cpus",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "symphonia",
+ "tar",
+ "tary-recorder",
+ "tempfile",
+ "thiserror 2.0.21",
+ "ureq",
+]
+
+[[package]]
+name = "tary-recorder"
+version = "0.2.2"
+dependencies = [
+ "chrono",
+ "hound",
+ "libpulse-binding",
+ "libpulse-simple-binding",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "tauri"
 version = "2.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4703,6 +4683,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+]
+
+[[package]]
+name = "transcriptary"
+version = "0.2.2"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "sys-locale",
+ "tary-core",
+ "tary-recorder",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-global-shortcut",
+ "tauri-plugin-opener",
+ "tauri-plugin-single-instance",
+ "tempfile",
 ]
 
 [[package]]

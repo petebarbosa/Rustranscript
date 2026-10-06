@@ -31,7 +31,7 @@ pub(crate) fn spec() -> Spec {
 
 /// Tempo máximo para conectar/consultar o servidor (um servidor travado não pode travar a gravação).
 const SERVER_TIMEOUT: Duration = Duration::from_secs(3);
-const APP_NAME: &str = "Rustranscript";
+const APP_NAME: &str = "Transcriptary";
 
 #[derive(Default)]
 pub struct PulseBackend;

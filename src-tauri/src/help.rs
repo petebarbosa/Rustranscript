@@ -121,6 +121,8 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("tary setup", "Transcription runtime (isolated Python + models), installed inside the data directory", "Entorno de transcripción (Python aislado + modelos), instalado dentro del directorio de datos"),
     ("tary setup status", "State of the runtime and models", "Estado del entorno y de los modelos"),
     ("tary setup install", "Installs the runtime and downloads the missing models (progress on stderr; does not need the app)", "Instala el entorno y descarga los modelos que faltan (progreso en stderr; no necesita la app)"),
+    ("tary desktop", "App menu entry (the AppImage creates it by itself the first time it opens)", "Entrada en el menú de apps (el AppImage la crea solo la primera vez que se abre)"),
+    ("tary desktop remove", "Deletes the menu entry and icons created by the AppImage (they come back the next time it opens)", "Borra la entrada del menú y los íconos creados por el AppImage (vuelven la próxima vez que se abre)"),
 ];
 
 /// Textos fixos do `clap` (cabeçalhos e a ajuda embutida), nos três idiomas:

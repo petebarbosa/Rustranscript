@@ -3,6 +3,7 @@
 
 mod bar;
 mod cli;
+mod desktop;
 mod gui;
 mod help;
 mod i18n;

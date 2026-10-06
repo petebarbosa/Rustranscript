@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tauri::{Emitter, Manager, State};
 
 use crate::i18n::Lang;
-use crate::{ipc, player, recording, shell, shortcut, transcription, tray};
+use crate::{desktop, ipc, player, recording, shell, shortcut, transcription, tray};
 
 pub(crate) struct AppState {
     pub(crate) data_dir: PathBuf,
@@ -527,6 +527,7 @@ pub fn run(data_dir: Option<PathBuf>) {
             }
             recording::startup(&handle);
             transcription::startup(&handle);
+            desktop::integrate_appimage();
             // a janela principal nasce invisível (`tauri.conf.json`): só aparece se a app não foi
             // aberta pela CLI/atalho para gravar (`ipc::spawn_gui`)
             if !shell::started_hidden()

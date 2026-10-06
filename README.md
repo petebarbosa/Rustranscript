@@ -47,7 +47,10 @@ The screenshots use synthetic data.
 **AppImage (any distro)**
 
 1. Download `Transcriptary_*.AppImage` from the [Releases](https://github.com/petebarbosa/Transcriptary/releases) page.
-2. `chmod +x Transcriptary_*.AppImage`, then run it.
+2. `chmod +x Transcriptary_*.AppImage`, then run it. After the first launch,
+   Transcriptary appears in your app menu and search. Before deleting the
+   AppImage, run
+   `./Transcriptary_*.AppImage desktop remove` to take it out of the menu.
 3. Optional, to get the `tary` command in your terminal:
    `ln -s /path/to/Transcriptary.AppImage ~/.local/bin/tary`
 

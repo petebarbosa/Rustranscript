@@ -170,6 +170,11 @@ enum Cmd {
         #[command(subcommand)]
         what: SetupCmd,
     },
+    /// Entrada no menu de apps (o AppImage a cria sozinho na primeira abertura)
+    Desktop {
+        #[command(subcommand)]
+        what: DesktopCmd,
+    },
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
@@ -231,6 +236,12 @@ enum SetupCmd {
     Status,
     /// Instala o ambiente e baixa os modelos que faltam (progresso no stderr; não precisa da app)
     Install,
+}
+
+#[derive(Subcommand)]
+enum DesktopCmd {
+    /// Apaga a entrada do menu e os ícones criados pelo AppImage (voltam na próxima abertura dele)
+    Remove,
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
@@ -514,6 +525,19 @@ pub fn run(args: Vec<std::ffi::OsString>) -> i32 {
     if matches!(cli.cmd, Cmd::Gui) {
         crate::gui::run(cli.data_dir);
         return 0;
+    }
+    if let Cmd::Desktop { what: DesktopCmd::Remove } = cli.cmd {
+        // não precisa do banco
+        return match crate::desktop::remove() {
+            Ok(removed) => {
+                println!("{}", serde_json::to_string_pretty(&json!({"removed": removed})).unwrap());
+                0
+            }
+            Err(e) => {
+                eprintln!("{}", serde_json::to_string_pretty(&json!({"error": {"code": e.code(), "message": e.detail()}})).unwrap());
+                1
+            }
+        };
     }
     let data_dir = paths::resolve_data_dir(cli.data_dir.as_deref());
     let mut lang = cli.lang.as_deref().and_then(Lang::parse);
@@ -1151,6 +1175,7 @@ fn exec(app: &App, cmd: Cmd, lang: Lang, json_out: bool) -> core_lib::Result<Out
         Cmd::Transcribe(a) => exec_transcribe(app, a, lang, &sock(app)),
         Cmd::Queue { what } => exec_queue(app, what.unwrap_or(QueueCmd::List), lang, &sock(app)),
         Cmd::Setup { what } => exec_setup(app, what, lang),
+        Cmd::Desktop { .. } => unreachable!(),
         Cmd::Audio { what } => exec_audio(app, what, lang, &sock(app)),
         Cmd::Reclaimable => {
             let files = import::reclaimable(app)?;

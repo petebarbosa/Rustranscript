@@ -17,6 +17,11 @@ fn project_dirs() -> Option<directories::ProjectDirs> {
     directories::ProjectDirs::from("", "", APP_NAME)
 }
 
+/// `$XDG_DATA_HOME` (padrão `~/.local/share`): onde o desktop procura `applications/` e `icons/`.
+pub fn xdg_data_home() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|d| d.data_dir().to_path_buf())
+}
+
 pub fn config_file() -> PathBuf {
     project_dirs()
         .map(|d| d.config_dir().join("config.json"))

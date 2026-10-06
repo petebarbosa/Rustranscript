@@ -709,3 +709,113 @@ fn moving_a_call_carries_the_raw_data_and_refuses_open_jobs() {
     let blocks = blocks_of(&dst, done_id(&res));
     assert_eq!(blocks.iter().filter(|b| b.0 == "Eu").count(), 12);
 }
+
+// ------------------------------------------------------------------ cortes de áudio (#23)
+
+/// Os trechos (segundos na linha do tempo da chamada) em que algum bloco começa ou termina dentro de `[a, b)`.
+fn inside(blocks: &[Row], a: f64, b: f64) -> Vec<&Row> {
+    blocks.iter().filter(|r| r.1 < b && r.2 > a).collect()
+}
+
+#[test]
+fn cuts_are_snapshotted_into_the_job_and_muted_audio_yields_no_segments() {
+    let e = env();
+    let call = e.call("call_a", Some(60), Some(60));
+    let mut lib = e.lib();
+    lib.add_cuts(call, &[(10.0, 20.0)], core_lib::Origin::Ui, false).unwrap();
+    let job = e.enqueue(call, JobKind::Full, JobOptions::default());
+    assert_eq!(queue::get(&e.app, job.id).unwrap().options.cuts, vec![(10.0, 20.0)], "cópia no momento de criar o job");
+    // um corte feito depois não muda o que o job já enfileirado vai usar
+    lib.add_cuts(call, &[(40.0, 50.0)], core_lib::Origin::Ui, false).unwrap();
+    assert_eq!(queue::get(&e.app, job.id).unwrap().options.cuts, vec![(10.0, 20.0)]);
+    // o job roda com a cópia feita ao enfileirar
+    let mut spy = Spy::default();
+    let (_, res) = e.run(&mut spy);
+    assert_eq!(spy.kinds, vec!["transcribe", "transcribe", "energy", "energy", "diarize"]);
+    let blocks = blocks_of(&lib, done_id(&res));
+    assert!(inside(&blocks, 10.0, 20.0).is_empty(), "nenhum trecho dentro do corte: {:?}", inside(&blocks, 10.0, 20.0));
+    // fora do corte tudo continua na linha do tempo ORIGINAL (sem concatenar, sem deslocar)
+    assert!(blocks.iter().any(|b| b.1 == 20.0) && blocks.iter().any(|b| b.1 == 5.0));
+    assert!(!inside(&blocks, 40.0, 50.0).is_empty(), "o corte feito depois não valeu para este job");
+    assert_eq!(blocks.len(), 24 - 4, "2 trechos por trilha caíram dentro de 10..20");
+}
+
+#[test]
+fn the_muted_ranges_follow_the_mic_offset_per_track() {
+    let e = env();
+    let call = e.call("call_a", Some(60), Some(60));
+    let stream = |file: &str, first: i64| {
+        serde_json::json!({"file": file, "device": "d", "description": "D", "is_monitor": false, "first_sample_unix_ms": first,
+            "first_read_unix_ms": null, "latency_ms": null, "fragment_ms": 100, "samples": 0, "cuts": [], "reconnects": 0})
+    };
+    let sidecar = serde_json::json!({"schema": 1, "state": "complete", "key": "call_a", "app_version": "0", "started_at": "2026-01-01T00:00:00",
+        "started_unix_ms": 0, "ended_at": null, "duration_s": null, "sample_rate": 16000, "channels": 1, "format": "s16le",
+        "mic": stream("mic.wav", 3_000), "sys": stream("sys.wav", 1_000), "extra": {}});
+    std::fs::write(e.lib().root().join("call_a/recording.json"), serde_json::to_vec(&sidecar).unwrap()).unwrap();
+    let mut lib = e.lib();
+    lib.add_cuts(call, &[(30.0, 40.0)], core_lib::Origin::Ui, false).unwrap();
+    e.enqueue(call, JobKind::Full, JobOptions::default());
+    /// Guarda o `mute` de cada requisição, com o áudio que ela leu (mic.flac / sys.flac).
+    struct Rec(FakeEngine, std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<(f64, f64)>)>>>);
+    impl Engine for Rec {
+        fn execute(&mut self, req: &ToWorker, on_event: &mut dyn FnMut(&FromWorker) -> Flow) -> Result<Terminal> {
+            match req {
+                ToWorker::Transcribe { audio, mute, .. } => self.1.lock().unwrap().push((format!("asr:{audio}"), mute.clone())),
+                ToWorker::Energy { audio, mute, .. } => self.1.lock().unwrap().push((format!("energy:{audio}"), mute.clone())),
+                ToWorker::Diarize { mute, .. } => self.1.lock().unwrap().push(("diarize".into(), mute.clone())),
+                _ => {}
+            }
+            self.0.execute(req, on_event)
+        }
+        fn shutdown(&mut self) {}
+    }
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (_, res) = e.run(&mut Rec(FakeEngine::new(), log.clone()));
+    let seen = log.lock().unwrap().clone();
+    let find = |prefix: &str, track: &str| seen.iter().find(|s| s.0.starts_with(prefix) && (track.is_empty() || s.0.contains(track))).unwrap().1.clone();
+    assert_eq!(find("asr:", "sys"), vec![(30.0, 40.0)], "sys: o eixo da chamada");
+    assert_eq!(find("asr:", "mic"), vec![(28.0, 38.0)], "mic começou 2 s depois: o mesmo trecho está 2 s antes no arquivo");
+    assert_eq!(find("energy:", "mic"), vec![(28.0, 38.0)]);
+    assert_eq!(find("energy:", "sys"), vec![(30.0, 40.0)]);
+    assert_eq!(find("diarize", ""), vec![(30.0, 40.0)]);
+    let blocks = blocks_of(&lib, done_id(&res));
+    assert!(inside(&blocks, 31.0, 39.0).is_empty());
+}
+
+#[test]
+fn rediarize_drops_cloned_passages_inside_cuts_made_after_the_full_run() {
+    let e = env();
+    let call = e.call("call_a", Some(60), Some(60));
+    e.enqueue(call, JobKind::Full, JobOptions::default());
+    let (_, res) = e.run(&mut FakeEngine::new());
+    let lib_blocks = blocks_of(&e.lib(), done_id(&res));
+    assert!(!inside(&lib_blocks, 10.0, 20.0).is_empty());
+    let mut lib = e.lib();
+    lib.add_cuts(call, &[(10.0, 20.0)], core_lib::Origin::Ui, false).unwrap();
+    let mut spy = Spy::default();
+    e.enqueue(call, JobKind::Rediarize, JobOptions::default());
+    let (job, res) = e.run(&mut spy);
+    assert_eq!(spy.kinds, vec!["diarize"]);
+    assert_eq!(job.options.cuts, vec![(10.0, 20.0)]);
+    let blocks = blocks_of(&lib, done_id(&res));
+    assert!(inside(&blocks, 10.0, 20.0).is_empty(), "o bruto clonado perdeu o que cai dentro do corte");
+    assert_eq!(blocks.len(), lib_blocks.len() - 4);
+}
+
+#[test]
+fn drop_cut_segments_applies_the_half_rule_with_the_mic_shifted_by_the_offset() {
+    let e = env();
+    let call = e.call("call_a", Some(60), Some(60));
+    e.enqueue(call, JobKind::Full, JobOptions::default());
+    let (full, _) = e.run(&mut FakeEngine::new());
+    let mut lib = e.lib();
+    let count = |lib: &Library, t| staging::segments(lib, full.id, t).unwrap().len();
+    assert_eq!((count(&lib, Track::Sys), count(&lib, Track::Mic)), (12, 12));
+    // segmentos de 4,5 s a cada 5 s. Corte 14..20: o sys [10,14.5) tem 11 % dentro (fica), o [15,19.5) está todo (sai).
+    // Sem deslocamento o mic é igual: sai 1 de cada. Com o mic 2 s depois, o arquivo [10,14.5) vira [12,16.5) na chamada
+    // (55 % dentro) e [15,19.5) vira [17,21.5) (67 %): saem 2 do mic.
+    let n = staging::drop_cut_segments(&mut lib, full.id, &[(14.0, 20.0)], 2.0).unwrap();
+    assert_eq!((n, count(&lib, Track::Sys), count(&lib, Track::Mic)), (3, 11, 10));
+    // o corte vazio não mexe em nada
+    assert_eq!(staging::drop_cut_segments(&mut lib, full.id, &[], 2.0).unwrap(), 0);
+}

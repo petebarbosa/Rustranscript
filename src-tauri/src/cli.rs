@@ -74,6 +74,11 @@ enum Cmd {
         #[command(subcommand)]
         what: EditCmd,
     },
+    /// Cortes de áudio: tira tangentes da chamada (o player pula e o "Refazer" ignora; os FLACs não mudam)
+    Cut {
+        #[command(subcommand)]
+        what: CutCmd,
+    },
     /// Histórico de alterações
     History {
         call: Option<String>,
@@ -329,6 +334,31 @@ enum EditCmd {
         call: String,
         seq: i64,
         speaker: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum CutCmd {
+    /// Lista os cortes vivos da chamada (id, início, fim, duração; `block_seq` = bloco excluído que o originou)
+    List { call: String },
+    /// Corta [início, fim): os blocos com metade ou mais da duração dentro dos cortes são excluídos, no mesmo lote do `undo`
+    Add {
+        call: String,
+        /// Início: segundos (83.5), mm:ss ou hh:mm:ss
+        start: String,
+        /// Fim (mesmos formatos); depois do fim da chamada é ajustado
+        end: String,
+        /// Mostra quantos blocos sairiam, sem gravar
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove um corte e traz de volta os blocos que o salvamento dele havia excluído (e já não estão cobertos)
+    Remove {
+        call: String,
+        /// Id do corte (`cut list`)
+        id: i64,
         #[arg(long)]
         dry_run: bool,
     },
@@ -981,6 +1011,32 @@ fn exec(app: &App, cmd: Cmd, lang: Lang, json_out: bool) -> core_lib::Result<Out
                 dry(dry_run, to_json(r)?, lib.id(), Some(id))
             }
         },
+        Cmd::Cut { what } => match what {
+            CutCmd::List { call } => {
+                let (lib, id) = find_call(app, &call)?;
+                let cuts: Vec<Value> = lib
+                    .cuts(id)?
+                    .into_iter()
+                    .map(|c| {
+                        let mut v = to_json(&c).unwrap_or(Value::Null);
+                        v["duration_s"] = json!(((c.t_end - c.t_start) * 1000.0).round() / 1000.0);
+                        v
+                    })
+                    .collect();
+                json(Value::Array(cuts))
+            }
+            CutCmd::Add { call, start, end, dry_run } => {
+                let (mut lib, id) = find_call(app, &call)?;
+                let span = (parse_time(&start)?, parse_time(&end)?);
+                let r = lib.add_cuts(id, &[span], Origin::Cli, dry_run)?;
+                dry(dry_run, to_json(r)?, lib.id(), Some(id))
+            }
+            CutCmd::Remove { call, id: cut, dry_run } => {
+                let (mut lib, id) = find_call(app, &call)?;
+                let r = lib.remove_cut(id, cut, Origin::Cli, dry_run)?;
+                dry(dry_run, to_json(r)?, lib.id(), Some(id))
+            }
+        },
         Cmd::History { call, limit } => match call {
             Some(c) => {
                 let (lib, id) = find_call(app, &c)?;
@@ -1268,6 +1324,25 @@ fn fmt_time(secs: f64) -> String {
     if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m:02}:{s:02}") }
 }
 
+/// Tempo da CLI: segundos (`83.5`), `mm:ss` ou `hh:mm:ss` (os segundos podem ter fração).
+fn parse_time(s: &str) -> core_lib::Result<f64> {
+    let bad = || Error::invalid(format!("time {s:?}: use seconds (83.5), mm:ss or hh:mm:ss"));
+    let parts: Vec<&str> = s.trim().split(':').collect();
+    if parts.len() > 3 {
+        return Err(bad());
+    }
+    let mut total = 0.0;
+    for (i, p) in parts.iter().enumerate() {
+        let v: f64 = p.parse().map_err(|_| bad())?;
+        // só o último campo pode ter fração; nenhum pode ser negativo
+        if !v.is_finite() || v < 0.0 || (i + 1 < parts.len() && v.fract() != 0.0) {
+            return Err(bad());
+        }
+        total = total * 60.0 + v;
+    }
+    Ok(total)
+}
+
 /// Texto corrido para ler no terminal: `#seq [mm:ss] Falante: texto`.
 fn render_text(app: &App, d: &core_lib::model::CallDetail, lang: Lang) -> String {
     let me = app.setting("me_name").ok().flatten();
@@ -1287,6 +1362,10 @@ fn render_text(app: &App, d: &core_lib::model::CallDetail, lang: Lang) -> String
         };
         let mark = if b.edited { format!(" ({})", i18n::msg(lang, "edited")) } else { String::new() };
         out.push_str(&format!("#{} [{}] {name}{mark}: {}\n", b.seq, fmt_time(b.t_start), b.text));
+    }
+    if !d.cuts.is_empty() {
+        let list: Vec<String> = d.cuts.iter().map(|c| format!("{}–{}", fmt_time(c.t_start), fmt_time(c.t_end))).collect();
+        out.push_str(&format!("\n[{}: {}]\n", i18n::msg(lang, "audio_cuts"), list.join(", ")));
     }
     out
 }
@@ -1660,6 +1739,81 @@ mod tests {
         let ids: Vec<_> = v["models"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
         assert_eq!(ids, ["whisper", "segmentation", "embedding"]);
         assert!(v["runtime"]["state"].is_string() && v["runtime"]["runtime_version"].is_u64());
+    }
+
+    #[test]
+    fn parse_time_accepts_seconds_mmss_and_hhmmss() {
+        assert_eq!(parse_time("83.5").unwrap(), 83.5);
+        assert_eq!(parse_time("01:23").unwrap(), 83.0);
+        assert_eq!(parse_time("1:02:03.5").unwrap(), 3723.5);
+        assert_eq!(parse_time(" 0:00 ").unwrap(), 0.0);
+        for bad in ["", "abc", "1:2:3:4", "-5", "1.5:30", "1:-3", "nan", "inf"] {
+            assert!(parse_time(bad).is_err_and(|e| e.code() == "invalid"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn cut_list_add_remove_with_dry_run_and_undo() {
+        let (_tmp, app) = setup();
+        let call = "call_2026-06-01_10-00-00";
+        let seqs = |v: &Value, k: &str| v[k].as_array().unwrap().iter().map(|b| b["seq"].as_i64().unwrap()).collect::<Vec<_>>();
+        // sem áudio não há o que cortar
+        assert!(run(&app, &["cut", "add", call, "0", "10"]).is_err_and(|e| e.code() == "no_audio"));
+        let (lib, id) = find_call(&app, call).unwrap();
+        lib.conn.execute("UPDATE calls SET mic_path = 'x/mic.flac', duration_s = 600 WHERE id = ?1", [id]).unwrap();
+        // a importação de texto não sabe onde o bloco acaba: dá 20 s a cada um
+        lib.conn.execute("UPDATE blocks SET t_end = t_start + 20", []).unwrap();
+        drop(lib);
+        let d = run(&app, &["show", call]).unwrap().0;
+        let b2 = (d["blocks"][1]["t_start"].as_f64().unwrap(), d["blocks"][1]["t_end"].as_f64().unwrap());
+        assert!(b2.1 > b2.0, "o bloco 2 tem duração");
+        let (a, b) = (format!("{}", b2.0 - 1.0), format!("{}", b2.1 + 1.0));
+
+        let (v, notify) = run(&app, &["cut", "add", call, &a, &b, "--dry-run"]).unwrap();
+        assert!(notify.is_none());
+        assert_eq!((v["dry_run"].as_bool(), seqs(&v["result"], "deleted_blocks")), (Some(true), vec![2]));
+        assert_eq!(run(&app, &["cut", "list", call]).unwrap().0, json!([]));
+
+        let (v, notify) = run(&app, &["cut", "add", call, &a, &b]).unwrap();
+        assert_eq!((seqs(&v, "deleted_blocks"), v["added"].as_array().unwrap().len()), (vec![2], 1));
+        assert_eq!(notify.unwrap()["event"], "changed");
+        let (d, _) = run(&app, &["show", call]).unwrap();
+        assert_eq!((seqs(&d, "blocks"), seqs(&d, "deleted_blocks")), (vec![1, 3], vec![2]));
+        assert_eq!(d["cuts"].as_array().unwrap().len(), 1);
+        let (l, _) = run(&app, &["cut", "list", call]).unwrap();
+        assert_eq!((l[0]["t_start"].as_f64(), l[0]["duration_s"].as_f64()), (Some(b2.0 - 1.0), Some(b2.1 - b2.0 + 2.0)));
+        let argv = ["rstt", "show", call, "--text"];
+        let Output::Text(t) = exec(&app, Cli::try_parse_from(argv).unwrap().cmd, Lang::EnUs, false).unwrap() else { panic!() };
+        assert!(t.contains("Audio cuts") && !t.contains("#2 "), "{t}");
+        // mm:ss também vale
+        assert!(run(&app, &["cut", "add", call, "01:00", "01:01", "--dry-run"]).is_ok());
+        assert!(run(&app, &["cut", "add", call, "x", "10"]).is_err_and(|e| e.code() == "invalid"));
+
+        let cut = l[0]["id"].as_i64().unwrap().to_string();
+        assert!(run(&app, &["cut", "remove", call, "999"]).is_err_and(|e| e.code() == "not_found"));
+        let (v, _) = run(&app, &["cut", "remove", call, &cut, "--dry-run"]).unwrap();
+        assert_eq!(seqs(&v["result"], "restored_blocks"), [2]);
+        assert_eq!(run(&app, &["cut", "list", call]).unwrap().0.as_array().unwrap().len(), 1);
+        let (v, notify) = run(&app, &["cut", "remove", call, &cut]).unwrap();
+        assert_eq!(seqs(&v, "restored_blocks"), [2]);
+        assert!(notify.is_some());
+        assert_eq!(seqs(&run(&app, &["show", call]).unwrap().0, "blocks"), [1, 2, 3]);
+        // desfazer a remoção traz o corte e a exclusão de volta, num passo só
+        let (u, _) = run(&app, &["undo", call]).unwrap();
+        assert_eq!((u["batch_kind"].as_str(), u["batch_size"].as_i64()), (Some("cut_remove"), Some(2)));
+        let (d, _) = run(&app, &["show", call]).unwrap();
+        assert_eq!((seqs(&d, "blocks"), d["cuts"].as_array().unwrap().len()), (vec![1, 3], 1));
+
+        // excluir um bloco cria um corte ligado a ele; restaurar o tira
+        run(&app, &["edit", "delete", call, "1"]).unwrap();
+        let (l, _) = run(&app, &["cut", "list", call]).unwrap();
+        assert_eq!(l.as_array().unwrap().len(), 2);
+        let linked = l.as_array().unwrap().iter().find(|c| c["block_seq"] == 1).expect("corte ligado ao bloco 1");
+        assert!(run(&app, &["cut", "remove", call, &linked["id"].to_string()]).is_err_and(|e| e.code() == "conflict"), "o corte de um bloco sai restaurando o bloco");
+        run(&app, &["edit", "restore", call, "1"]).unwrap();
+        assert_eq!(run(&app, &["cut", "list", call]).unwrap().0.as_array().unwrap().len(), 1);
+        run(&app, &["undo", call]).unwrap();
+        assert_eq!(run(&app, &["cut", "list", call]).unwrap().0.as_array().unwrap().len(), 2, "o undo do restore devolve o corte");
     }
 
     #[test]

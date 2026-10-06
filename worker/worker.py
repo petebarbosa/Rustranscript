@@ -20,7 +20,7 @@ import traceback
 from importlib import metadata
 
 PROTOCOL = 1
-WORKER_VERSION = "0.2.0"
+WORKER_VERSION = "0.3.0"
 REQUESTS = ("transcribe", "diarize", "energy")
 SAMPLE_RATE = 16000
 REQUIRED = object()
@@ -136,9 +136,26 @@ def field(msg, key, kind, default=REQUIRED):
     return float(v) if kind is float else v
 
 
+def parse_mute(v):
+    """`mute`: lista de [início, fim] em segundos do ARQUIVO da trilha (cortes de áudio, #23); ausente = nada."""
+    if v is None:
+        return []
+    if not isinstance(v, list):
+        raise BadRequest("invalid field: mute")
+    out = []
+    for r in v:
+        ok = isinstance(r, (list, tuple)) and len(r) == 2 and all(
+            isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) for x in r)
+        if not ok:
+            raise BadRequest("invalid field: mute")
+        if r[1] > r[0]:
+            out.append((float(r[0]), float(r[1])))
+    return out
+
+
 def parse_request(msg):
     kind = msg["type"]
-    p = {"audio": field(msg, "audio", str)}
+    p = {"audio": field(msg, "audio", str), "mute": parse_mute(msg.get("mute"))}
     if kind == "transcribe":
         p.update(
             track=field(msg, "track", str), model_dir=field(msg, "model_dir", str),
@@ -184,6 +201,21 @@ def fake_duration(path):
         raise WorkerError("audio_decode", "%s: %s" % (type(e).__name__, e))
 
 
+def fake_audible(mute, start, end):
+    """Parte de [start, end] que sobra fora de `mute` (do 1º ao último instante audível); None = tudo zerado.
+    É o que o VAD faria com áudio zerado; mesma regra do `FakeEngine` em Rust (`audible`)."""
+    pieces = [(start, end)]
+    for ms, me in mute:
+        nxt = []
+        for a, b in pieces:
+            if me <= a or ms >= b:
+                nxt.append((a, b))
+                continue
+            nxt.extend(x for x in ((a, max(ms, a)), (min(me, b), b)) if x[1] > x[0])
+        pieces = nxt
+    return (pieces[0][0], pieces[-1][1]) if pieces else None
+
+
 def fake_delay_s():
     raw = os.environ.get("RSTT_FAKE_DELAY_MS")
     if raw is None and os.environ.get("RSTT_FAKE_WORKER") == "slow":
@@ -213,6 +245,12 @@ def fake_transcribe(ctx, p):
         if ctx.cancelled():
             return send_cancelled(rid, n)
         start, end = k * 5.0, min(k * 5.0 + 4.5, dur)
+        heard = fake_audible(p["mute"], start, end)
+        if heard is None:  # áudio zerado pelos cortes: nada a transcrever (o VAD real pula)
+            send({"type": "progress", "id": rid, "stage": "transcribe", "audio_s": end, "total_s": dur})
+            k += 1
+            continue
+        start, end = heard
         text = "%s %d" % (prefix, k)
         seg = {"type": "segment", "id": rid, "start": start, "end": end, "text": text}
         if p["word_timestamps"]:
@@ -238,7 +276,9 @@ def fake_diarize(ctx, p):
         if ctx.cancelled():
             return send_cancelled(rid, 0)
         start = i * 15.0
-        turns.append({"start": start, "end": min(start + 15.0, dur), "speaker": i % nspk})
+        heard = fake_audible(p["mute"], start, min(start + 15.0, dur))
+        if heard is not None:
+            turns.append({"start": heard[0], "end": heard[1], "speaker": i % nspk})
         send({"type": "progress", "id": rid, "stage": "diarize_embedding", "done": i + 1, "total": n_turns})
     send({"type": "result", "id": rid, "turns": turns, "speakers": len({t["speaker"] for t in turns})})
 
@@ -250,7 +290,10 @@ def fake_energy(ctx, p):
     # sem o tipo da trilha no pedido: o nome do arquivo decide (mic.flac = -25 dB, abaixo do sys em -20 dB)
     level = -25.0 if "mic" in os.path.basename(p["audio"]).lower() else -20.0
     n = math.ceil(dur * 1000 / p["step_ms"])
-    send({"type": "result", "id": ctx.id, "step_ms": p["step_ms"], "db": [level] * n})
+    step = p["step_ms"] / 1000.0
+    # passo todo dentro de áudio zerado = piso (-120 dB), como o RMS de zeros no worker real
+    db = [-120.0 if fake_audible(p["mute"], i * step, (i + 1) * step) is None else level for i in range(n)]
+    send({"type": "result", "id": ctx.id, "step_ms": p["step_ms"], "db": db})
 
 
 # ---------------------------------------------------------------- modo real
@@ -274,6 +317,23 @@ def decode(path):
         raise
     except Exception as e:
         raise WorkerError("audio_decode", "%s: %s" % (type(e).__name__, e))
+
+
+def apply_mute(audio, ranges):
+    """Zera as amostras dentro dos cortes (segundos do arquivo), logo depois de decodificar e antes de qualquer
+    processamento. Os tempos seguem os do arquivo: nada é fatiado nem concatenado (sem `clip_timestamps`). O VAD
+    pula o silêncio resultante, então essas partes quase não custam tempo."""
+    if not ranges:
+        return audio
+    flags = getattr(audio, "flags", None)
+    if flags is not None and not flags.writeable:
+        audio = audio.copy()
+    n = len(audio)
+    for a, b in ranges:
+        i, j = max(0, int(round(a * SAMPLE_RATE))), min(n, int(round(b * SAMPLE_RATE)))
+        if j > i:
+            audio[i:j] = 0.0
+    return audio
 
 
 def load_whisper(model_dir, threads):
@@ -358,7 +418,7 @@ class ProgressPacer:
 def real_transcribe(ctx, p):
     rid, t0 = ctx.id, time.perf_counter()
     send({"type": "progress", "id": rid, "stage": "loading_model"})
-    audio = decode(p["audio"])
+    audio = apply_mute(decode(p["audio"]), p["mute"])
     total = len(audio) / SAMPLE_RATE
     start_s = p["start_s"]
     # retomada: o VAD ignora clip_timestamps, então fatiamos o array e somamos start_s aos tempos
@@ -407,7 +467,7 @@ def real_diarize(ctx, p):
         if not os.path.isfile(p[key]):
             raise WorkerError("model_missing", "diarization model not found: %s" % os.path.basename(p[key]))
     send({"type": "progress", "id": rid, "stage": "diarize_segmentation"})
-    audio = decode(p["audio"])
+    audio = apply_mute(decode(p["audio"]), p["mute"])
     if len(audio) == 0:
         send({"type": "result", "id": rid, "turns": [], "speakers": 0})
         return
@@ -449,7 +509,7 @@ def real_diarize(ctx, p):
 
 def real_energy(ctx, p):
     import numpy as np
-    audio = decode(p["audio"])
+    audio = apply_mute(decode(p["audio"]), p["mute"])
     if ctx.cancelled():
         return send_cancelled(ctx.id, 0)
     step = SAMPLE_RATE * p["step_ms"] // 1000 or 1

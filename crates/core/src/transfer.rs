@@ -243,6 +243,23 @@ fn copy_rows(src: &Library, dst: &mut Library, call_id: i64, client_id: Option<i
         }
     }
 
+    // cortes de áudio (#23), inclusive os removidos (o histórico ainda aponta para eles); `block_id` segue o bloco novo
+    let mut cuts = HashMap::new();
+    {
+        let mut st = s.prepare("SELECT id, t_start, t_end, block_id, created_at, removed_at FROM audio_cuts WHERE call_id = ?1 ORDER BY id")?;
+        let rows = st.query_map([call_id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?, r.get::<_, f64>(2)?, r.get::<_, Option<i64>>(3)?, r.get::<_, String>(4)?, r.get::<_, Option<String>>(5)?))
+        })?;
+        for row in rows {
+            let (id, a, b, block, created, removed) = row?;
+            tx.execute(
+                "INSERT INTO audio_cuts (call_id, t_start, t_end, block_id, created_at, removed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![new_call, a, b, block.and_then(|b| blocks.get(&b).copied()), created, removed],
+            )?;
+            cuts.insert(id, tx.last_insert_rowid());
+        }
+    }
+
     for (sql_sel, sql_ins) in [
         ("SELECT t, title FROM chapters WHERE call_id = ?1", "INSERT INTO chapters (call_id, t, title) VALUES (?1, ?2, ?3)"),
         (
@@ -288,6 +305,7 @@ fn copy_rows(src: &Library, dst: &mut Library, call_id: i64, client_id: Option<i
                 "block_speaker" => (blocks.get(&eid).copied(), map_speaker(old), map_speaker(new)),
                 "call_title" => (Some(new_call), old, new),
                 "speaker_name" => (speakers.get(&eid).copied(), old, new),
+                "audio_cut" => (cuts.get(&eid).copied(), old, new),
                 _ => (None, old, new),
             };
             let Some(eid) = eid else { continue };

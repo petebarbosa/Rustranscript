@@ -65,6 +65,11 @@ pub struct JobOptions {
     pub bleed_margin_db: Option<f64>,
     #[serde(default)]
     pub diarization_threshold: Option<f64>,
+    /// Cortes de áudio (#23) da chamada NO MOMENTO em que a tarefa foi criada: a união, em segundos, na linha do
+    /// tempo original. `enqueue` preenche (um valor passado por quem chama é ignorado); o worker zera esses
+    /// intervalos nas duas trilhas, e uma tarefa repetida (`retry`) mantém o instantâneo.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cuts: Vec<(f64, f64)>,
 }
 
 /// Texto da configuração → valor (ausente/inválido = `None`).

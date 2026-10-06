@@ -54,6 +54,11 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
   let player: PlayerCtl | null = null
   /** Por que não há player (linha discreta sob o cabeçalho); null = tem áudio, ou ainda se descobrindo. */
   let audioNote: string | null = null
+  /** Modo de cortar áudio (#23): a lista de cortes aparece acima da barra do player; os cortes novos vivem no player. */
+  let cutMode = false
+  /** Assinatura dos cortes que o player já conhece (o que mudou depois de um `reload` precisa ser reenviado ao Rust). */
+  const cutSig = () => d.cuts.map(c => `${c.t_start}-${c.t_end}`).join(',')
+  let cutsSeen = cutSig()
 
   const speakerById = () => new Map(d.speakers.map(s => [s.id, s]))
   const styleFor = (s: SpeakerInfo | undefined, order: Map<number, number>): string[] => {
@@ -216,6 +221,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
         <p class="mt-14 text-center text-xs text-zinc-700">${esc(t('call.end'))}</p>`}</main>
     </div>
     <div id="dock" class="@container pointer-events-none sticky bottom-0 z-30 px-6 pb-4">
+    ${pending ? '' : cutPanelHtml()}
     ${pending ? '' : `<div id="select-bar" hidden class="pointer-events-auto mx-auto mb-3 flex w-fit max-w-[calc(100%-2rem)] flex-wrap items-center justify-center gap-x-3 gap-y-2 rounded-2xl border border-violet-400/30 bg-ink-900/95 px-4 py-2.5 shadow-2xl backdrop-blur-md">
       <span id="select-count" aria-live="polite" class="min-w-[6.5rem] text-sm font-medium text-white"></span>
       <button type="button" data-sel="all" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/5 hover:text-zinc-100">${esc(t('select.all'))}</button>
@@ -387,6 +393,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     await loadBleed()
     editor = null
     syncAudio()
+    syncCuts()
     draw(keepScroll)
     runSearch()
     const kb = keep && el.querySelector<HTMLElement>(`[data-block="${keep.id}"]`)
@@ -406,6 +413,8 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
   function describeEntry(e: HistoryEntry) {
     if (e.batch_kind === 'delete') return t('delete.done', { n: e.batch_size ?? 1 })
     if (e.batch_kind === 'restore') return t('delete.restored', { n: e.batch_size ?? 1 })
+    if (e.batch_kind === 'cut_add') return t('cut.history_add')
+    if (e.batch_kind === 'cut_remove') return t('cut.history_remove')
     if (e.batch_id) return t(e.origin === 'import' ? 'history.glossary_import' : 'history.glossary_batch', { n: e.batch_size ?? 1 })
     const spk = speakerById()
     const blk = d.blocks.find(b => b.id === e.entity_id)
@@ -415,6 +424,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
       case 'call_title': return t('history.call_title')
       case 'speaker_name': return t('history.speaker_name', { to: e.new_value ?? t('history.cleared') })
       case 'block_deleted': return t(e.new_value ? 'delete.done' : 'delete.restored', { n: 1 })
+      case 'audio_cut': return t(e.new_value ? 'cut.history_remove' : 'cut.history_add')
     }
   }
 
@@ -890,7 +900,10 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
       const info = await api.playerOpen(libraryId, callId)
       if (!alive) { void api.playerClose(libraryId, callId); return } // saiu da tela enquanto abria
       if (!info.available) { audioNote = noteFor(info.reason ?? 'none'); paintNote(); return }
-      player = createPlayer({ libraryId, callId, duration: info.duration_s, onPosition: () => paintPlaying() })
+      player = createPlayer({
+        libraryId, callId, duration: info.duration_s, onPosition: () => paintPlaying(), cuts: d.cuts,
+        onCutToggle: () => void setCutMode(!cutMode), onPending: () => paintCutPanel(),
+      })
       el.querySelector('#dock')?.append(player.el)
     } catch (e) {
       if (alive) { audioNote = noteFor('unreadable', describeError(e)); paintNote() }
@@ -915,6 +928,97 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     if (!noAudioReason() || !player) return
     void player.dispose()
     player = null
+    cutMode = false
+  }
+
+  // ------------------------------------------------------------ cortes de áudio (#23)
+  /** Depois de qualquer mudança nos cortes (salvar, remover, excluir/restaurar trecho, desfazer): a onda e o motor acompanham. */
+  function syncCuts() {
+    const now = cutSig()
+    if (now === cutsSeen) return
+    cutsSeen = now
+    if (!player) return
+    player.setCuts(d.cuts)
+    void api.playerSetCuts(libraryId, callId).catch(() => {})
+  }
+
+  const spanText = (a: number, b: number) => `${fmtTime(a, d.duration_s >= 3600)} – ${fmtTime(b, d.duration_s >= 3600)}`
+  const spanLen = (a: number, b: number) => { const s = b - a; return s >= 60 ? `${Math.floor(s / 60)} min ${String(Math.round(s % 60)).padStart(2, '0')} s` : `${s >= 10 ? Math.round(s) : s.toFixed(1)} s` }
+
+  /** O quadro de cortes: cortes novos (ainda não salvos) e os salvos, cada um com seu remover. */
+  function cutPanelHtml() {
+    const fresh = player?.pending() ?? []
+    const row = (a: number, b: number, tag: string, btn: string) => `<li class="flex items-center gap-3 rounded-xl border border-white/10 bg-ink-950/60 px-3 py-1.5 text-xs">
+        <span class="font-mono tabular-nums text-zinc-200">${esc(spanText(a, b))}</span>
+        <span class="font-mono tabular-nums text-zinc-500">${esc(spanLen(a, b))}</span>${tag}<span class="ml-auto">${btn}</span></li>`
+    const rm = (attrs: string, label: string) => `<button type="button" ${attrs} class="rounded-lg px-2 py-1 text-zinc-400 hover:bg-white/5 hover:text-rose-300">${esc(label)}</button>`
+    const pill = (text: string, cls: string) => `<span class="rounded-full px-2 py-px text-[10px] font-medium ${cls}">${esc(text)}</span>`
+    const items = [
+      ...fresh.map(([a, b], i) => row(a, b, pill(t('cut.new'), 'bg-violet-400/15 text-violet-200'), rm(`data-cut="drop" data-i="${i}"`, t('cut.discard')))),
+      ...d.cuts.map(c => row(c.t_start, c.t_end,
+        c.block_id != null ? pill(c.block_seq != null ? t('cut.from_block', { seq: c.block_seq }) : t('cut.from_block_gone'), 'bg-white/5 text-zinc-400') : '',
+        // o corte de um trecho excluído sai restaurando o trecho; só o manual tem "remover" aqui
+        c.block_id != null && c.block_seq != null ? '' : rm(`data-cut="remove" data-id="${c.id}"`, t('cut.remove')))),
+    ]
+    return `<div id="cut-panel" ${cutMode ? '' : 'hidden'} class="pointer-events-auto mx-auto mb-3 max-w-6xl rounded-2xl border border-violet-400/30 bg-ink-900/95 p-4 shadow-2xl backdrop-blur-md">
+      <div class="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
+        <div class="min-w-[16rem] flex-1">
+          <h2 class="text-sm font-semibold text-white">${esc(t('cut.title'))}</h2>
+          <p class="mt-1 text-xs text-zinc-400">${esc(t('cut.hint'))}</p>
+          <p data-cut-note class="mt-1.5 rounded-lg bg-white/[0.03] px-2.5 py-1.5 text-xs text-zinc-500">${esc(t('cut.silence_note'))}</p>
+        </div>
+        <div class="flex shrink-0 items-center gap-2">
+          <span class="text-xs text-zinc-500">${fresh.length ? esc(t('cut.pending_count', { n: fresh.length })) : ''}</span>
+          <button type="button" data-cut="cancel" class="${btnCls.btn}">${esc(t('cut.cancel'))}</button>
+          <button type="button" data-cut="save" ${fresh.length ? '' : 'disabled'} class="${btnCls.btnPrimary} disabled:cursor-not-allowed disabled:opacity-40">${esc(t('cut.save'))}</button>
+        </div>
+      </div>
+      <ul data-cut-list class="mt-3 max-h-40 space-y-1 overflow-y-auto">${items.join('') || `<li class="px-1 py-1 text-xs text-zinc-600">${esc(t('cut.empty'))}</li>`}</ul></div>`
+  }
+
+  /** Refaz só o quadro (um corte novo marcado na onda), sem redesenhar a página. */
+  function paintCutPanel() {
+    const box = el.querySelector('#cut-panel')
+    if (!box) return
+    const tmp = document.createElement('div')
+    tmp.innerHTML = cutPanelHtml()
+    box.replaceWith(tmp.firstElementChild!)
+  }
+
+  async function setCutMode(on: boolean) {
+    if (on === cutMode || !player) return
+    if (on && !(await leave())) return
+    if (on) await setSelecting(false)
+    cutMode = on
+    player.setCutMode(on)
+    paintCutPanel()
+    el.querySelector<HTMLElement>('#cut-panel')?.scrollIntoView({ block: 'nearest' })
+  }
+
+  /** Mostra quantos trechos sairiam, confirma e grava tudo num lote só (desfazer = um passo). */
+  async function saveCuts() {
+    const spans = player?.pending() ?? []
+    if (!player || !spans.length) return
+    try {
+      const preview = await api.previewCuts(libraryId, callId, spans)
+      if (!preview.added.length) { toast(t('cut.nothing_new')); player.setPending([]); paintCutPanel(); return }
+      const n = preview.deleted_blocks.length
+      if (!(await confirmDialog(t('cut.confirm_title', { n: preview.added.length }), n ? t('cut.confirm_body', { n }) : t('cut.confirm_none'), t('cut.confirm_action')))) return
+      const r = await api.addCuts(libraryId, callId, spans)
+      await setCutMode(false)
+      await reload()
+      const gone = r.deleted_blocks.length
+      toastAction(gone ? `${t('cut.done', { n: r.added.length })} · ${t('delete.done', { n: gone })}` : t('cut.done', { n: r.added.length }), t('delete.undo'), () => void undo())
+    } catch (e) { toast(describeError(e), 'err') }
+  }
+
+  async function removeCut(id: number) {
+    try {
+      const r = await api.removeCut(libraryId, callId, id)
+      await reload()
+      const back = r.restored_blocks.length
+      toast(back ? `${t('cut.removed')} · ${t('delete.restored', { n: back })}` : t('cut.removed'))
+    } catch (e) { toast(describeError(e), 'err') }
   }
 
   function bind() {
@@ -994,6 +1098,15 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
       else if (act === 'dismiss' && job) { dismissed.add(job.id); paintJob() }
       else if (act === 'cancel' && job) void cancelJob(job)
       else if (act === 'retry') void (job && job.state === 'failed' ? retryJob(job) : enqueueCall(libraryId, callId))
+      return
+    }
+    const cut = target.closest<HTMLElement>('[data-cut]')
+    if (cut) {
+      const what = cut.dataset.cut
+      if (what === 'cancel') void setCutMode(false)
+      else if (what === 'save') void saveCuts()
+      else if (what === 'drop') { const v = player?.pending() ?? []; v.splice(Number(cut.dataset.i), 1); player?.setPending(v); paintCutPanel() }
+      else if (what === 'remove') void removeCut(Number(cut.dataset.id))
       return
     }
     const sel = target.closest<HTMLElement>('[data-sel]')?.dataset.sel

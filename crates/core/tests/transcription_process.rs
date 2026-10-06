@@ -47,11 +47,12 @@ fn transcribe(id: &str, audio: &Path, track: &str, start_s: f64) -> ToWorker {
         word_timestamps: true,
         vad_min_silence_ms: 500,
         start_s,
+        mute: vec![],
     }
 }
 
 fn diarize(id: &str, audio: &Path, clusters: Option<u32>) -> ToWorker {
-    ToWorker::Diarize { id: id.into(), audio: audio.display().to_string(), seg_model: "/x".into(), emb_model: "/y".into(), num_clusters: clusters, threshold: 0.7, threads: 1 }
+    ToWorker::Diarize { id: id.into(), audio: audio.display().to_string(), seg_model: "/x".into(), emb_model: "/y".into(), num_clusters: clusters, threshold: 0.7, threads: 1, mute: vec![] }
 }
 
 fn alive(pid: u32) -> bool {
@@ -95,6 +96,40 @@ fn same(a: &serde_json::Value, b: &serde_json::Value) -> bool {
     }
 }
 
+fn with_mute(mut req: ToWorker, ranges: &[(f64, f64)]) -> ToWorker {
+    match &mut req {
+        ToWorker::Transcribe { mute, .. } | ToWorker::Diarize { mute, .. } | ToWorker::Energy { mute, .. } => *mute = ranges.to_vec(),
+        _ => unreachable!(),
+    }
+    req
+}
+
+/// Inícios e fins dos segmentos entregues.
+fn spans(events: &[serde_json::Value]) -> Vec<(f64, f64)> {
+    events.iter().filter(|m| m["type"] == "segment").map(|m| (m["start"].as_f64().unwrap(), m["end"].as_f64().unwrap())).collect()
+}
+
+#[test]
+#[ignore = "precisa de python3"]
+fn muted_ranges_produce_no_segments_in_the_real_worker_process() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let sys = flac(dir.path(), "sys", 40);
+    let mut real = engine(dir.path());
+    let (plain, _) = collect(&mut real, &transcribe("a", &sys, "sys", 0.0));
+    let (muted, res) = collect(&mut real, &with_mute(transcribe("b", &sys, "sys", 0.0), &[(10.0, 20.0)]));
+    let (all, none) = (spans(&plain), spans(&muted));
+    assert!(all.iter().any(|s| s.0 >= 10.0 && s.1 <= 20.0), "sem corte há segmentos em 10..20");
+    assert!(none.iter().all(|s| !(s.0 >= 10.0 && s.1 <= 20.0)), "nenhum segmento inteiro dentro do corte: {none:?}");
+    assert!(none.len() < all.len() && !none.is_empty());
+    assert!(res["type"] == "result");
+    // a energia da faixa zerada cai a silêncio
+    let (_, e) = collect(&mut real, &with_mute(ToWorker::Energy { id: "e".into(), audio: sys.display().to_string(), step_ms: 100, mute: vec![] }, &[(5.0, 7.0)]));
+    let db = e["db"].as_array().unwrap();
+    assert!(db[60].as_f64().unwrap() < -100.0 && db[10].as_f64().unwrap() > -100.0);
+    real.shutdown();
+}
+
 #[test]
 #[ignore = "precisa de python3"]
 fn fake_worker_matches_the_in_memory_fake_engine() {
@@ -111,8 +146,13 @@ fn fake_worker_matches_the_in_memory_fake_engine() {
         transcribe("c", &sys, "sys", 12.0),
         diarize("d", &sys, None),
         diarize("e", &sys, Some(3)),
-        ToWorker::Energy { id: "f".into(), audio: sys.display().to_string(), step_ms: 100 },
-        ToWorker::Energy { id: "g".into(), audio: mic.display().to_string(), step_ms: 100 },
+        ToWorker::Energy { id: "f".into(), audio: sys.display().to_string(), step_ms: 100, mute: vec![] },
+        ToWorker::Energy { id: "g".into(), audio: mic.display().to_string(), step_ms: 100, mute: vec![] },
+        // com trechos zerados (#23): o worker em Python e o motor em memória têm de concordar
+        with_mute(transcribe("h", &sys, "sys", 0.0), &[(10.0, 20.0), (31.0, 33.0)]),
+        with_mute(transcribe("i", &mic, "mic", 8.0), &[(12.0, 16.0)]),
+        with_mute(diarize("j", &sys, Some(3)), &[(10.0, 20.0)]),
+        with_mute(ToWorker::Energy { id: "k".into(), audio: sys.display().to_string(), step_ms: 100, mute: vec![] }, &[(5.0, 7.0)]),
     ];
     for req in &requests {
         let (ev_real, mut res_real) = collect(&mut real, req);

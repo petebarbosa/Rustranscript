@@ -196,6 +196,81 @@ class FakeTranscribe(FakeBase):
         self.assertEqual(msgs[-2]["type"], "progress")  # o 100 % vem logo antes do resultado
 
 
+class FakeMute(FakeBase):
+    """Cortes de áudio (#23): trechos zerados não geram segmento; os tempos seguem os do arquivo."""
+
+    def run_mute(self, mute, **kw):
+        req = self.transcribe(**kw)
+        req["mute"] = mute
+        self.w.send(req)
+        return self.w.until()
+
+    def test_fully_muted_windows_produce_no_segments(self):
+        msgs = self.run_mute([[10.0, 20.0]], words=True)  # cobre as janelas de 10 e de 15
+        segs = [m for m in msgs if m["type"] == "segment"]
+        self.assertEqual([(s["start"], s["end"], s["text"]) for s in segs],
+                         [(0.0, 4.5, "fala trecho 0"), (5.0, 9.5, "fala trecho 1"), (20.0, 23.0, "fala trecho 4")])
+        self.assertEqual(msgs[-1]["segments"], 3)
+        # o progresso continua cobrindo o arquivo todo (a linha do tempo não muda)
+        self.assertEqual([m for m in msgs if m["type"] == "progress"][-1]["audio_s"], 23.0)
+
+    def test_partly_muted_window_keeps_only_the_audible_part(self):
+        segs = [m for m in self.run_mute([[2.0, 7.0]]) if m["type"] == "segment"]
+        self.assertEqual([(s["start"], s["end"]) for s in segs][:2], [(0.0, 2.0), (7.0, 9.5)])
+
+    def test_no_mute_is_the_old_behaviour_and_bad_mute_is_rejected(self):
+        self.assertEqual(self.run_mute([])[-1]["segments"], 5)
+        for bad in ("x", [[1]], [["a", 2]], [[True, 2]]):
+            msgs = self.run_mute(bad, rid="b" + str(abs(hash(str(bad)))))
+            self.assertEqual((msgs[-1]["type"], msgs[-1]["code"]), ("error", "bad_request"))
+
+    def test_diarize_and_energy_honour_mute(self):
+        self.w.send({"type": "diarize", "id": "d1", "audio": self.sys_flac, "seg_model": "/x", "emb_model": "/y",
+                     "mute": [[15.0, 30.0]]})
+        turns = self.w.until()[-1]["turns"]
+        self.assertEqual([(t["start"], t["end"]) for t in turns], [(0.0, 15.0)])
+        self.w.send({"type": "energy", "id": "e1", "audio": self.sys_flac, "step_ms": 1000, "mute": [[2.0, 4.0]]})
+        db = self.w.until()[-1]["db"]
+        self.assertEqual(db[:5], [-20.0, -20.0, -120.0, -120.0, -20.0])
+
+
+class ApplyMute(unittest.TestCase):
+    """`apply_mute` sem numpy: um stand-in com `__len__`/`__setitem__` de fatia (o array real do worker é igual)."""
+
+    class Arr:
+        def __init__(self, n):
+            self.v = [1.0] * n
+
+        def __len__(self):
+            return len(self.v)
+
+        def __setitem__(self, sl, value):
+            self.v[sl] = [value] * len(range(*sl.indices(len(self.v))))
+
+    def load(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("rstt_worker", WORKER)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_zeroes_only_the_ranges_in_both_directions_and_clamps(self):
+        w = self.load()
+        a = self.Arr(16000 * 10)
+        out = w.apply_mute(a, [(1.0, 2.0), (9.5, 99.0), (-3.0, 0.5), (5.0, 5.0)])
+        self.assertIs(out, a)
+        z = [i for i, x in enumerate(a.v) if x == 0.0]
+        want = list(range(0, 8000)) + list(range(16000, 32000)) + list(range(152000, 160000))
+        self.assertEqual(z, want)
+        self.assertEqual(len(a), 160000)  # nada é fatiado nem concatenado: o tempo do arquivo não muda
+
+    def test_empty_ranges_return_the_same_array_untouched(self):
+        w = self.load()
+        a = self.Arr(100)
+        self.assertIs(w.apply_mute(a, []), a)
+        self.assertEqual(sum(a.v), 100.0)
+
+
 class FakeDiarizeEnergy(FakeBase):
     def diarize(self, rid="d1", n=None):
         return {"type": "diarize", "id": rid, "audio": self.sys_flac, "seg_model": "/s", "emb_model": "/e",

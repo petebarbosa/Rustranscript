@@ -7,12 +7,14 @@
 //! - `mixer`: mic + sys no eixo de tempo das transcrições (aplica o `mic_offset` do sidecar).
 //! - `stretch`: velocidade sem mudar o tom (WSOLA próprio). `session`: tudo o que decide o som e a posição, sem relógio.
 //! - `engine`: a thread (`Player`), os comandos e os eventos. `peaks`: onda sonora e seu cache (`peaks.bin`).
+//! - `skip`: cortes de áudio (#23): o player pula `[início, fim)`; mixer e WSOLA veem a chamada sem eles.
 //! - `source`: caminhos no disco, deslocamento do sidecar e o motivo de não haver áudio.
 pub mod decode;
 pub mod engine;
 pub mod mixer;
 pub mod peaks;
 pub mod session;
+pub mod skip;
 pub mod source;
 pub mod stretch;
 

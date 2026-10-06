@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use super::decode::TrackReader;
+use super::skip::CutMap;
 use crate::{Error, Result};
 
 struct MixTrack {
@@ -23,6 +24,9 @@ pub struct Mixer {
     rate: u32,
     /// Amostras do eixo da chamada: o fim da trilha que acaba por último.
     len: u64,
+    /// Cortes a pular (#23). `len()`, `pos()`, `seek` e `read` são da linha do tempo SEM os cortes; com a lista
+    /// vazia (o normal) é o eixo da chamada.
+    cuts: CutMap,
     pos: u64,
     acc: Vec<i32>,
     scratch: Vec<i16>,
@@ -50,20 +54,32 @@ impl Mixer {
 
     fn from_tracks(tracks: Vec<MixTrack>, rate: u32) -> Mixer {
         let len = tracks.iter().map(|t| t.end()).max().unwrap_or(0).max(0) as u64;
-        Mixer { tracks, rate, len, pos: 0, acc: Vec::new(), scratch: Vec::new() }
+        Mixer { tracks, rate, len, cuts: CutMap::default(), pos: 0, acc: Vec::new(), scratch: Vec::new() }
     }
 
     pub fn rate(&self) -> u32 {
         self.rate
     }
 
-    /// Duração em amostras.
-    pub fn len(&self) -> u64 {
+    /// Duração em amostras do eixo da chamada, cortes incluídos.
+    pub fn call_len(&self) -> u64 {
         self.len
     }
 
+    /// Liga os cortes (em segundos): a leitura passa a pular esses intervalos. Reposicione com `seek`.
+    pub fn set_cuts(&mut self, cuts_s: &[(f64, f64)]) -> CutMap {
+        self.cuts = CutMap::new(cuts_s, self.rate, self.len);
+        self.pos = self.pos.min(self.len());
+        self.cuts.clone()
+    }
+
+    /// Duração em amostras, sem os cortes (o que o player de fato toca).
+    pub fn len(&self) -> u64 {
+        self.len - self.cuts.removed()
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.len() == 0
     }
 
     pub fn pos(&self) -> u64 {
@@ -71,17 +87,32 @@ impl Mixer {
     }
 
     pub fn seek(&mut self, pos: u64) {
-        self.pos = pos.min(self.len);
+        self.pos = pos.min(self.len());
     }
 
     /// Entrega as próximas amostras misturadas (menos que o pedido só no fim). Trilha ilegível no meio da
-    /// leitura vira silêncio desse ponto em diante: o player não para por causa de um arquivo cortado.
+    /// leitura vira silêncio desse ponto em diante: o player não para por causa de um arquivo cortado. Os cortes
+    /// são pulados: a leitura para no começo de um e continua no fim dele, sem emenda para quem lê.
     pub fn read(&mut self, out: &mut [i16]) -> usize {
-        let n = (out.len() as u64).min(self.len - self.pos) as usize;
-        if n == 0 {
-            return 0;
+        let mut done = 0;
+        while done < out.len() && self.pos < self.len() {
+            let from = self.cuts.to_orig(self.pos);
+            let stop = self.cuts.next_start(from).unwrap_or(self.len);
+            let n = (out.len() - done).min((stop - from) as usize).min((self.len() - self.pos) as usize);
+            if n == 0 {
+                break;
+            }
+            self.read_at(from, &mut out[done..done + n]);
+            self.pos += n as u64;
+            done += n;
         }
-        let from = self.pos as i64;
+        done
+    }
+
+    /// Mistura `out.len()` amostras do eixo da chamada a partir de `from` (já dentro da chamada).
+    fn read_at(&mut self, from: u64, out: &mut [i16]) {
+        let n = out.len();
+        let from = from as i64;
         self.acc.clear();
         self.acc.resize(n, 0);
         for t in &mut self.tracks {
@@ -104,8 +135,6 @@ impl Mixer {
         for (o, &a) in out.iter_mut().zip(&self.acc) {
             *o = a.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
         }
-        self.pos += n as u64;
-        n
     }
 }
 

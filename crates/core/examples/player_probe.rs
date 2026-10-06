@@ -5,6 +5,10 @@
 //! - `play <sys.flac> [mic.flac] [mic_offset_s]`: toca um roteiro (pular, tocar, pausar, 2×) pela saída de áudio
 //!   da execução. Com `PULSE_SINK=<null sink>` só neste processo, `parec` no monitor mostra o que saiu e quando.
 //!
+//! - `cuts <sys.flac> <ini-fim[,ini-fim...]> [velocidade]`: toca o arquivo do começo ao fim pulando os cortes (#23) e
+//!   confere que nenhum evento de posição cai dentro de um corte. Com `PULSE_SINK=<null sink>` e `parec` no monitor
+//!   dá para ver na saída o trecho cortado ausente.
+//!
 //! `cargo build --release -p rstt-core --example player_probe`
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -20,13 +24,15 @@ fn main() {
         std::process::exit(2);
     };
     let sys = PathBuf::from(sys);
-    let mic = args.get(2).map(PathBuf::from);
-    let mic_offset_s = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let cuts_mode = mode == "cuts";
+    let mic = args.get(2).filter(|_| !cuts_mode).map(PathBuf::from);
+    let mic_offset_s = args.get(3).filter(|_| !cuts_mode).and_then(|s| s.parse().ok()).unwrap_or(0.0);
     let dir = sys.parent().unwrap().to_path_buf();
     let audio = CallAudio { sys: Some(sys), mic, mic_offset_s, dir };
     match mode.as_str() {
         "peaks" => measure(&audio),
         "play" => play(&audio),
+        "cuts" => cuts(&audio, args.get(2).map_or("", String::as_str), args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1.0)),
         other => eprintln!("modo desconhecido: {other}"),
     }
 }
@@ -59,7 +65,7 @@ fn measure(audio: &CallAudio) {
             Ok(Box::new(s) as Box<dyn PlaybackSink>)
         })
     };
-    let player = Player::open(audio, opener, Arc::new(|_| {})).expect("player");
+    let player = Player::open(audio, &[], opener, Arc::new(|_| {})).expect("player");
     let at = player.duration_s * 0.97;
     let t = Instant::now();
     player.seek(at);
@@ -70,6 +76,43 @@ fn measure(audio: &CallAudio) {
     }
     println!("pular para {at:.0}s e tocar -> 1o som: {:.2?}", t.elapsed());
     player.close();
+}
+
+/// Toca tudo com cortes: imprime cada mudança de posição (a cada 250 ms) e, no fim, se algum evento caiu em um corte.
+fn cuts(audio: &CallAudio, spec: &str, speed: f64) {
+    let cuts: Vec<(f64, f64)> = spec.split(',').filter_map(|c| c.split_once('-')).filter_map(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))).collect();
+    assert!(!cuts.is_empty(), "uso: player_probe cuts <sys.flac> 3-5,8-9 [velocidade]");
+    let t0 = Instant::now();
+    let inside = Arc::new(Mutex::new(Vec::<f64>::new()));
+    let ended = Arc::new(Mutex::new(false));
+    let last = Mutex::new((Instant::now() - Duration::from_secs(10), PlayState::Paused));
+    let on_event: EventFn = {
+        let (inside, ended, cuts) = (inside.clone(), ended.clone(), cuts.clone());
+        Arc::new(move |e| {
+            if cuts.iter().any(|&(a, b)| e.position_s > a + 1e-6 && e.position_s < b - 1e-6) {
+                inside.lock().unwrap().push(e.position_s);
+            }
+            if e.state == PlayState::Ended {
+                *ended.lock().unwrap() = true;
+            }
+            let mut l = last.lock().unwrap();
+            if l.0.elapsed() >= Duration::from_millis(250) || l.1 != e.state {
+                *l = (Instant::now(), e.state);
+                eprintln!("[{:7.3}s] evento: {:?} pos={:.3}s", t0.elapsed().as_secs_f64(), e.state, e.position_s);
+            }
+        })
+    };
+    let p = Player::open(audio, &cuts, default_sink_opener(), on_event).expect("player");
+    p.set_speed(speed);
+    eprintln!("[{:7.3}s] play (cortes {cuts:?}, {speed}x, duracao {:.1}s)", t0.elapsed().as_secs_f64(), p.duration_s);
+    p.play();
+    while !*ended.lock().unwrap() {
+        assert!(t0.elapsed() < Duration::from_secs(120), "nao terminou");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    eprintln!("[{:7.3}s] fim; eventos com posicao dentro de um corte: {:?}", t0.elapsed().as_secs_f64(), inside.lock().unwrap());
+    p.close();
 }
 
 fn play(audio: &CallAudio) {
@@ -83,7 +126,7 @@ fn play(audio: &CallAudio) {
             eprintln!("[{:7.3}s]   evento: {:?} pos={:.3}s vel={}", t0.elapsed().as_secs_f64(), e.state, e.position_s, e.speed);
         }
     });
-    let p = Player::open(audio, default_sink_opener(), on_event).expect("player");
+    let p = Player::open(audio, &[], default_sink_opener(), on_event).expect("player");
     let wait = |s: f64| std::thread::sleep(Duration::from_secs_f64(s));
     wait(0.5);
     log("pular para 32 s e tocar");

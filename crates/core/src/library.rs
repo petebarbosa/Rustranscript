@@ -228,6 +228,7 @@ impl Library {
             },
             chapters: self.chapters(id)?,
             audio: AudioInfo { mic_path, sys_path, deleted_at },
+            cuts: self.cuts(id)?,
         })
     }
 
@@ -497,7 +498,7 @@ impl Library {
         self.edit(dry_run, |tx| {
             let batch = new_batch(tx, if delete { "delete" } else { "restore" })?;
             let now = db::now();
-            let mut out = BlocksChange { changed: vec![], unchanged: vec![] };
+            let mut out = BlocksChange { changed: vec![], unchanged: vec![], cuts_added: vec![], cuts_removed: vec![] };
             for id in ids {
                 let call_id = Self::call_of_block(tx, id)?;
                 let old: Option<String> = tx.query_row("SELECT deleted_at FROM blocks WHERE id = ?1", [id], |r| r.get(0))?;
@@ -508,7 +509,14 @@ impl Library {
                 let new = delete.then(|| now.clone());
                 tx.execute("UPDATE blocks SET deleted_at = ?1 WHERE id = ?2", params![new, id])?;
                 record_in(tx, call_id, "block_deleted", id, old.as_deref(), new.as_deref(), origin, Some(batch))?;
-                out.changed.push(read_block(tx, id)?);
+                let block = read_block(tx, id)?;
+                // excluir o trecho também corta o áudio dele; restaurar devolve (tira os cortes ligados)
+                if delete {
+                    out.cuts_added.extend(crate::cuts::link_block_cut(tx, call_id, &block, origin, batch)?);
+                } else {
+                    out.cuts_removed.extend(crate::cuts::unlink_block_cuts(tx, call_id, id, origin, batch)?);
+                }
+                out.changed.push(block);
             }
             Ok(out)
         })
@@ -705,12 +713,14 @@ fn undo_entry(tx: &Connection, e: &HistoryEntry) -> Result<()> {
         "block_deleted" => {
             tx.execute("UPDATE blocks SET deleted_at = ?1 WHERE id = ?2", params![old, e.entity_id])?;
         }
+        // criar um corte grava o instante da criação em `old_value` ("antes estava removido"), remover grava NULL
+        "audio_cut" => crate::cuts::undo_cut(tx, e.entity_id, old)?,
         other => return Err(Error::invalid(format!("cannot undo {other}"))),
     }
     Ok(())
 }
 
-fn read_block(tx: &Connection, block_id: i64) -> Result<BlockInfo> {
+pub(crate) fn read_block(tx: &Connection, block_id: i64) -> Result<BlockInfo> {
     Ok(tx.query_row(&format!("SELECT {BLOCK_COLS} FROM blocks WHERE id = ?1"), [block_id], block_from_row)?)
 }
 

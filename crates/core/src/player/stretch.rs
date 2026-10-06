@@ -71,6 +71,8 @@ impl Stretcher {
     /// Recomeça do ponto `pos` do eixo da chamada (o mixer é posicionado junto).
     pub fn reset(&mut self, mixer: &mut Mixer, pos: u64) {
         mixer.seek(pos);
+        // a duração pode ter mudado (cortes novos): o fim da entrada é o do mixer
+        self.total = mixer.len();
         self.src.clear();
         self.base = mixer.pos();
         self.ended = false;

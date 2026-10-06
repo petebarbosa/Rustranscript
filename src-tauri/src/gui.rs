@@ -160,6 +160,23 @@ fn restore_blocks(state: State<AppState>, library_id: i64, block_ids: Vec<i64>) 
     with_lib(&state, library_id, |l| l.restore_blocks(&block_ids, Origin::Ui, false))
 }
 
+/// Cortes de áudio (#23). `preview_cuts` só calcula (quantos trechos sairiam) e não grava; `add_cuts` grava tudo em
+/// um lote; `remove_cut` tira um corte e devolve os trechos que o corte salvo havia excluído.
+#[tauri::command(async)]
+fn preview_cuts(state: State<AppState>, library_id: i64, call_id: i64, spans: Vec<[f64; 2]>) -> R<CutsChange> {
+    with_lib(&state, library_id, |l| l.add_cuts(call_id, &spans.iter().map(|s| (s[0], s[1])).collect::<Vec<_>>(), Origin::Ui, true))
+}
+
+#[tauri::command(async)]
+fn add_cuts(state: State<AppState>, library_id: i64, call_id: i64, spans: Vec<[f64; 2]>) -> R<CutsChange> {
+    with_lib(&state, library_id, |l| l.add_cuts(call_id, &spans.iter().map(|s| (s[0], s[1])).collect::<Vec<_>>(), Origin::Ui, false))
+}
+
+#[tauri::command(async)]
+fn remove_cut(state: State<AppState>, library_id: i64, call_id: i64, cut_id: i64) -> R<CutsChange> {
+    with_lib(&state, library_id, |l| l.remove_cut(call_id, cut_id, Origin::Ui, false))
+}
+
 #[tauri::command(async)]
 fn set_title(state: State<AppState>, library_id: i64, call_id: i64, title: String) -> R<CallSummary> {
     with_lib(&state, library_id, |l| l.set_title(call_id, &title, Origin::Ui, false))
@@ -555,6 +572,9 @@ pub fn run(data_dir: Option<PathBuf>) {
             revert_block,
             delete_blocks,
             restore_blocks,
+            preview_cuts,
+            add_cuts,
+            remove_cut,
             set_title,
             rename_speaker,
             set_block_speaker,
@@ -585,6 +605,7 @@ pub fn run(data_dir: Option<PathBuf>) {
             player::player_seek,
             player::player_speed,
             player::player_close,
+            player::player_set_cuts,
             recording::record_info,
             recording::record_devices,
             recording::record_status,

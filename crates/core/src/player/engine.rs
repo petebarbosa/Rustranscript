@@ -45,6 +45,8 @@ enum Cmd {
     Pause,
     Seek(f64),
     Speed(f64),
+    /// Cortes de áudio (#23) em segundos da linha original: troca os que o player pula.
+    Cuts(Vec<(f64, f64)>),
     Close,
 }
 
@@ -58,9 +60,9 @@ pub struct Player {
 }
 
 impl Player {
-    /// Abre os FLACs e sobe a thread, parada em 0 s. Erro = arquivos ilegíveis.
-    pub fn open(audio: &CallAudio, opener: SinkOpener, on_event: EventFn) -> Result<Player> {
-        Player::with_session(Session::new(audio.open_mixer()?), opener, on_event)
+    /// Abre os FLACs e sobe a thread, parada em 0 s, pulando `cuts` (segundos; vazio = tudo). Erro = arquivos ilegíveis.
+    pub fn open(audio: &CallAudio, cuts: &[(f64, f64)], opener: SinkOpener, on_event: EventFn) -> Result<Player> {
+        Player::with_session(Session::with_cuts(audio.open_mixer()?, cuts), opener, on_event)
     }
 
     pub fn with_session(session: Session, opener: SinkOpener, on_event: EventFn) -> Result<Player> {
@@ -87,6 +89,11 @@ impl Player {
 
     pub fn set_speed(&self, speed: f64) {
         let _ = self.tx.send(Cmd::Speed(speed));
+    }
+
+    /// Troca os cortes que o player pula, sem parar: continua de onde estava (se caiu num corte, no fim dele).
+    pub fn set_cuts(&self, cuts: Vec<(f64, f64)>) {
+        let _ = self.tx.send(Cmd::Cuts(cuts));
     }
 
     /// Para e espera a thread acabar.
@@ -214,6 +221,11 @@ impl Engine {
                 if self.state == PlayState::Ended {
                     self.state = PlayState::Paused;
                 }
+                self.emit(None);
+            }
+            Cmd::Cuts(cuts) => {
+                let at = if self.state == PlayState::Playing { self.settle() } else { (self.position_s() * f64::from(self.session.rate())).round() as u64 };
+                self.session.set_cuts(&cuts, at);
                 self.emit(None);
             }
             Cmd::Speed(v) => {

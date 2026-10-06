@@ -31,13 +31,23 @@ export interface BlockInfo {
   deleted_at: string | null
 }
 /** `delete_blocks`/`restore_blocks`: o que mudou e o que já estava no estado pedido (sem erro, sem histórico) */
-export interface BlocksChange { changed: BlockInfo[]; unchanged: BlockInfo[] }
+export interface BlocksChange { changed: BlockInfo[]; unchanged: BlockInfo[]; cuts_added: AudioCut[]; cuts_removed: AudioCut[] }
+/** Corte de áudio (#23): `[t_start, t_end)` na linha do tempo da chamada. `block_id`/`block_seq` = o trecho excluído que o originou
+ * (null = corte manual, que se remove na lista; o ligado a um trecho sai restaurando o trecho). */
+export interface AudioCut { id: number; t_start: number; t_end: number; block_id: number | null; block_seq: number | null; created_at: string }
+/** `preview_cuts` (só calcula) / `add_cuts` / `remove_cut`: `skipped` = pedidos já inteiramente cortados; `cuts` = a lista como fica. */
+export interface CutsChange {
+  call_id: number; added: AudioCut[]; removed: AudioCut[]; skipped: [number, number][]
+  deleted_blocks: BlockInfo[]; restored_blocks: BlockInfo[]; cuts: AudioCut[]
+}
 export interface Chapter { t: number; title: string }
 export interface CallDetail extends CallSummary {
   library_name: string; language: string | null; expected_speakers: number | null
   /** null = chamada sem transcrição ainda (pendente): transcripts/speakers/blocks/chapters vêm vazios */
   transcript_id: number | null; transcripts: TranscriptInfo[]; speakers: SpeakerInfo[]
   blocks: BlockInfo[]; deleted_blocks: BlockInfo[]; chapters: Chapter[]
+  /** cortes de áudio vivos (#23), em ordem de início */
+  cuts: AudioCut[]
   audio: { mic_path: string | null; sys_path: string | null; deleted_at: string | null }
 }
 /** `player_open`: o áudio da chamada pode tocar? Sem áudio: `reason` diz por quê (a tela explica, sem erro). */
@@ -53,11 +63,11 @@ export interface PlayerPosition {
 export const PLAYER_EVENT = 'player-position'
 
 export interface HistoryEntry {
-  id: number; call_id: number; entity: 'block_text' | 'block_speaker' | 'call_title' | 'speaker_name' | 'block_deleted'
+  id: number; call_id: number; entity: 'block_text' | 'block_speaker' | 'call_title' | 'speaker_name' | 'block_deleted' | 'audio_cut'
   entity_id: number; old_value: string | null; new_value: string | null
   origin: 'ui' | 'cli' | 'import'; at: string; undone_at: string | null
   /** lote (ex.: glossário aplicado): null = edição avulsa */
-  batch_id: number | null; batch_kind: 'glossary' | 'delete' | 'restore' | null; batch_size: number | null
+  batch_id: number | null; batch_kind: 'glossary' | 'delete' | 'restore' | 'cut_add' | 'cut_remove' | null; batch_size: number | null
 }
 // ---- glossário (ver GLOSSARY_CONTRACT.md)
 export type RuleKind = 'term' | 'replace'
@@ -307,6 +317,9 @@ export const api = {
   revertBlock: (libraryId: number, blockId: number) => call<BlockInfo>('revert_block', { libraryId, blockId }),
   deleteBlocks: (libraryId: number, blockIds: number[]) => call<BlocksChange>('delete_blocks', { libraryId, blockIds }),
   restoreBlocks: (libraryId: number, blockIds: number[]) => call<BlocksChange>('restore_blocks', { libraryId, blockIds }),
+  previewCuts: (libraryId: number, callId: number, spans: [number, number][]) => call<CutsChange>('preview_cuts', { libraryId, callId, spans }),
+  addCuts: (libraryId: number, callId: number, spans: [number, number][]) => call<CutsChange>('add_cuts', { libraryId, callId, spans }),
+  removeCut: (libraryId: number, callId: number, cutId: number) => call<CutsChange>('remove_cut', { libraryId, callId, cutId }),
   setTitle: (libraryId: number, callId: number, title: string) =>
     call<CallSummary>('set_title', { libraryId, callId, title }),
   renameSpeaker: (libraryId: number, speakerId: number, name: string | null) =>
@@ -402,6 +415,8 @@ export const api = {
   playerPause: () => call<void>('player_pause'),
   playerSeek: (seconds: number) => call<void>('player_seek', { seconds }),
   playerSpeed: (speed: number) => call<void>('player_speed', { speed }),
+  /** O player aberto relê os cortes da chamada (depois de salvar/remover cortes, excluir/restaurar, desfazer). */
+  playerSetCuts: (libraryId: number, callId: number) => call<void>('player_set_cuts', { libraryId, callId }),
   playerClose: (libraryId: number, callId: number) => call<void>('player_close', { libraryId, callId }),
 }
 

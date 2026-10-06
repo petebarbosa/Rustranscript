@@ -51,6 +51,19 @@ pub fn flac_duration_s(path: &Path) -> Result<f64> {
     Ok(total as f64 / rate as f64)
 }
 
+/// Parte de `[start, end]` que sobra fora de `mute` (do primeiro ao último instante audível); `None` = tudo zerado.
+/// Mesma regra do `worker.py --fake` (`fake_audible`).
+fn audible(mute: &[(f64, f64)], start: f64, end: f64) -> Option<(f64, f64)> {
+    let mut pieces = vec![(start, end)];
+    for &(ms, me) in mute {
+        pieces = pieces
+            .into_iter()
+            .flat_map(|(a, b)| if me <= a || ms >= b { vec![(a, b)] } else { [(a, ms.max(a)), (me.min(b), b)].into_iter().filter(|(x, y)| y > x).collect() })
+            .collect();
+    }
+    Some((pieces.first()?.0, pieces.last()?.1))
+}
+
 fn request_id(req: &ToWorker) -> Option<&str> {
     match req {
         ToWorker::Transcribe { id, .. } | ToWorker::Diarize { id, .. } | ToWorker::Energy { id, .. } | ToWorker::Cancel { id } => Some(id),
@@ -76,7 +89,7 @@ impl FakeEngine {
 impl Engine for FakeEngine {
     fn execute(&mut self, req: &ToWorker, on_event: &mut dyn FnMut(&FromWorker) -> Flow) -> Result<Terminal> {
         match req {
-            ToWorker::Transcribe { id, audio, track, language, word_timestamps, start_s, .. } => {
+            ToWorker::Transcribe { id, audio, track, language, word_timestamps, start_s, mute, .. } => {
                 let dur = flac_duration_s(Path::new(audio))?;
                 let who = if track == "mic" { "eu" } else { "fala" };
                 let first = (start_s / 5.0).ceil().max(0.0) as u64;
@@ -105,6 +118,13 @@ impl Engine for FakeEngine {
                         std::thread::sleep(Duration::from_millis(self.delay_ms));
                     }
                     let end = (start + 4.5).min(dur);
+                    // áudio zerado (cortes): sem fala, o VAD real não emite nada; só a parte que sobra fica
+                    let Some((start, end)) = audible(mute, start, end) else {
+                        if on_event(&progress("transcribe", Some(end))) == Flow::Cancel {
+                            return Ok(Terminal::Cancelled { segments: emitted });
+                        }
+                        continue;
+                    };
                     let text = format!("{who} trecho {k}");
                     let words = word_timestamps.then(|| {
                         let parts: Vec<&str> = text.split(' ').collect();
@@ -139,13 +159,16 @@ impl Engine for FakeEngine {
                     db: None,
                 }))
             }
-            ToWorker::Diarize { id, audio, num_clusters, .. } => {
+            ToWorker::Diarize { id, audio, num_clusters, mute, .. } => {
                 let dur = flac_duration_s(Path::new(audio))?;
                 let modulo = if num_clusters.unwrap_or(0) >= 3 { 3 } else { 2 };
                 let mut turns = Vec::new();
                 let mut k = 0i64;
                 while (k as f64) * 15.0 < dur {
-                    turns.push(TurnMsg { start: k as f64 * 15.0, end: ((k + 1) as f64 * 15.0).min(dur), speaker: k % modulo });
+                    // turno inteiro dentro de áudio zerado não existe; o resto fica só com a parte audível
+                    if let Some((start, end)) = audible(mute, k as f64 * 15.0, ((k + 1) as f64 * 15.0).min(dur)) {
+                        turns.push(TurnMsg { start, end, speaker: k % modulo });
+                    }
                     k += 1;
                 }
                 for stage in ["diarize_segmentation", "diarize_embedding"] {
@@ -166,10 +189,13 @@ impl Engine for FakeEngine {
                     db: None,
                 }))
             }
-            ToWorker::Energy { id, audio, step_ms } => {
+            ToWorker::Energy { id, audio, step_ms, mute } => {
                 let dur = flac_duration_s(Path::new(audio))?;
-                let n = (dur * 1000.0 / f64::from((*step_ms).max(1))).ceil() as usize;
+                let step = f64::from((*step_ms).max(1)) / 1000.0;
+                let n = (dur / step).ceil() as usize;
                 let level = if Path::new(audio).file_name().is_some_and(|f| f.to_string_lossy().contains("mic")) { -25.0 } else { -20.0 };
+                // o passo todo dentro de áudio zerado é o piso (-120 dB), como o RMS de zeros no worker real
+                let db = (0..n).map(|i| if audible(mute, i as f64 * step, (i as f64 + 1.0) * step).is_none() { -120.0 } else { level }).collect();
                 Ok(Terminal::Result(FromWorker::Result {
                     id: id.clone(),
                     segments: None,
@@ -178,7 +204,7 @@ impl Engine for FakeEngine {
                     turns: None,
                     speakers: None,
                     step_ms: Some(*step_ms),
-                    db: Some(vec![level; n]),
+                    db: Some(db),
                 }))
             }
             ToWorker::Cancel { .. } | ToWorker::Shutdown => Err(Error::invalid("not a request")),

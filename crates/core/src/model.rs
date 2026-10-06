@@ -89,6 +89,40 @@ pub struct BlockInfo {
 pub struct BlocksChange {
     pub changed: Vec<BlockInfo>,
     pub unchanged: Vec<BlockInfo>,
+    /// Cortes de áudio criados junto (excluir) ou removidos junto (restaurar), no mesmo lote do histórico.
+    pub cuts_added: Vec<AudioCut>,
+    pub cuts_removed: Vec<AudioCut>,
+}
+
+/// Corte de áudio: `[t_start, t_end)` na linha do tempo original da chamada (valem para mic e sys; os FLACs
+/// não mudam). `block_id` preenchido = criado ao excluir esse trecho (restaurar o trecho o remove).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AudioCut {
+    pub id: i64,
+    pub t_start: f64,
+    pub t_end: f64,
+    pub block_id: Option<i64>,
+    /// `seq` do trecho ligado, se ele está na versão ativa; `None` = corte manual (ou ligado a um trecho de
+    /// versão antiga: aí também pode ser removido à mão).
+    pub block_seq: Option<i64>,
+    pub created_at: String,
+}
+
+/// Resultado de salvar ou remover cortes manuais.
+#[derive(Debug, Clone, Serialize)]
+pub struct CutsChange {
+    pub call_id: i64,
+    /// Cortes novos (salvar) ou o removido (remover), já com `id`.
+    pub added: Vec<AudioCut>,
+    pub removed: Vec<AudioCut>,
+    /// Pedidos que já estavam dentro de cortes manuais salvos: não viram corte novo.
+    pub skipped: Vec<[f64; 2]>,
+    /// Trechos excluídos por causa dos cortes (salvar): pelo menos metade da duração dentro dos cortes.
+    pub deleted_blocks: Vec<BlockInfo>,
+    /// Trechos que voltaram (remover): estavam excluídos por um corte salvo e já não ficam metade cobertos.
+    pub restored_blocks: Vec<BlockInfo>,
+    /// Cortes em uso depois da mudança (em simulação, como ficariam).
+    pub cuts: Vec<AudioCut>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +155,8 @@ pub struct CallDetail {
     pub deleted_blocks: Vec<BlockInfo>,
     pub chapters: Vec<Chapter>,
     pub audio: AudioInfo,
+    /// Cortes de áudio em uso (#23), por início.
+    pub cuts: Vec<AudioCut>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,7 +173,8 @@ pub struct HistoryEntry {
     /// Alterações feitas juntas (p.ex. glossário aplicado à chamada) compartilham o `batch_id`
     /// e são desfeitas juntas. `None` = edição avulsa.
     pub batch_id: Option<i64>,
-    /// Tipo do lote: `"glossary"`, `"delete"` ou `"restore"` (exclusão/restauração de blocos).
+    /// Tipo do lote: `"glossary"`, `"delete"` ou `"restore"` (exclusão/restauração de blocos, com os cortes
+    /// ligados a eles), `"cut_add"` ou `"cut_remove"` (cortes manuais e os trechos que mudaram com eles).
     pub batch_kind: Option<String>,
     /// Quantas entradas o lote tem (para "glossário aplicado (N blocos)").
     pub batch_size: Option<i64>,

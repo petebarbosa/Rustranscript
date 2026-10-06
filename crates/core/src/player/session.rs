@@ -4,6 +4,7 @@
 use std::collections::VecDeque;
 
 use super::mixer::Mixer;
+use super::skip::CutMap;
 use super::stretch::Stretcher;
 
 /// Velocidades aceitas (fora disto, a mais próxima).
@@ -61,6 +62,9 @@ impl PositionTracker {
 
 pub struct Session {
     mixer: Mixer,
+    /// Cortes (#23). O mixer e o WSOLA andam na linha do tempo sem eles; a API pública da sessão (`seek`, `position`,
+    /// `len`) segue na linha original da chamada, e a conversão é feita só nas bordas.
+    cuts: CutMap,
     stretch: Stretcher,
     speed: f64,
     /// Saída produzida desde o último `seek`.
@@ -74,24 +78,37 @@ pub struct Session {
 impl Session {
     pub fn new(mixer: Mixer) -> Session {
         let stretch = Stretcher::new(mixer.rate(), mixer.len());
-        Session { mixer, stretch, speed: 1.0, out_total: 0, tracker: PositionTracker::new(0), finished: false, block: Vec::new() }
+        Session { mixer, cuts: CutMap::default(), stretch, speed: 1.0, out_total: 0, tracker: PositionTracker::new(0), finished: false, block: Vec::new() }
+    }
+
+    /// Sessão que pula `cuts_s` (segundos, linha original), parada em 0 s.
+    pub fn with_cuts(mixer: Mixer, cuts_s: &[(f64, f64)]) -> Session {
+        let mut s = Session::new(mixer);
+        s.set_cuts(cuts_s, 0);
+        s
+    }
+
+    /// Troca os cortes e reposiciona em `at` (amostras da linha original; dentro de um corte vira o fim dele).
+    pub fn set_cuts(&mut self, cuts_s: &[(f64, f64)], at: u64) {
+        self.cuts = self.mixer.set_cuts(cuts_s);
+        self.seek(at);
     }
 
     pub fn rate(&self) -> u32 {
         self.mixer.rate()
     }
 
-    /// Duração da chamada, em amostras.
+    /// Duração da chamada, em amostras (cortes incluídos: é a linha do tempo da tela).
     pub fn len(&self) -> u64 {
-        self.mixer.len()
+        self.mixer.call_len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.mixer.is_empty()
+        self.mixer.call_len() == 0
     }
 
     pub fn duration_s(&self) -> f64 {
-        self.mixer.len() as f64 / f64::from(self.mixer.rate())
+        self.mixer.call_len() as f64 / f64::from(self.mixer.rate())
     }
 
     pub fn speed(&self) -> f64 {
@@ -106,9 +123,9 @@ impl Session {
         self.seek(at);
     }
 
-    /// Posiciona na amostra `pos` (do eixo da chamada) e zera a conta da saída.
+    /// Posiciona na amostra `pos` (do eixo da chamada) e zera a conta da saída. Dentro de um corte, no fim dele.
     pub fn seek(&mut self, pos: u64) {
-        let pos = pos.min(self.mixer.len());
+        let pos = self.cuts.to_comp(pos.min(self.mixer.call_len()));
         self.stretch.reset(&mut self.mixer, pos);
         self.out_total = 0;
         self.tracker = PositionTracker::new(pos);
@@ -153,7 +170,7 @@ impl Session {
 
     /// Posição que está tocando (amostras), dado quanto da saída produzida ainda não tocou (`pending`).
     pub fn position(&self, pending: u64) -> u64 {
-        self.tracker.at(self.out_total.saturating_sub(pending))
+        self.cuts.to_orig(self.tracker.at(self.out_total.saturating_sub(pending))).min(self.mixer.call_len())
     }
 
     /// O mesmo em segundos, com a latência da saída.

@@ -412,7 +412,7 @@ fn player_plays_to_the_end_and_replays_from_the_start() {
     let audio = call_audio(dir.path(), Some(path), None);
     let (cb, rx) = events();
     let captured = Arc::new(Mutex::new(Vec::new()));
-    let p = Player::open(&audio, opener(captured.clone(), false), cb).unwrap();
+    let p = Player::open(&audio, &[], opener(captured.clone(), false), cb).unwrap();
     assert!((p.duration_s - 3.0).abs() < 1e-9);
     p.play();
     let seen = wait_for(&rx, |e| e.state == PlayState::Ended);
@@ -438,7 +438,7 @@ fn player_seek_while_paused_then_play_starts_there() {
     let audio = call_audio(dir.path(), Some(flac(dir.path(), "sys", &sys)), Some(flac(dir.path(), "mic", &mic)));
     let (cb, rx) = events();
     let captured = Arc::new(Mutex::new(Vec::new()));
-    let p = Player::open(&audio, opener(captured.clone(), false), cb).unwrap();
+    let p = Player::open(&audio, &[], opener(captured.clone(), false), cb).unwrap();
     p.seek(2.5);
     let e = wait_for(&rx, |e| e.state == PlayState::Paused).pop().unwrap();
     assert!((e.position_s - 2.5).abs() < 1e-6);
@@ -461,7 +461,7 @@ fn player_speed_makes_the_output_shorter() {
     let audio = call_audio(dir.path(), Some(flac(dir.path(), "a", &tone(440.0, 9000.0, RATE as usize * 8))), None);
     let (cb, rx) = events();
     let captured = Arc::new(Mutex::new(Vec::new()));
-    let p = Player::open(&audio, opener(captured.clone(), false), cb).unwrap();
+    let p = Player::open(&audio, &[], opener(captured.clone(), false), cb).unwrap();
     p.set_speed(2.0);
     assert_eq!(wait_for(&rx, |_| true)[0].speed, 2.0);
     p.play();
@@ -480,7 +480,7 @@ fn player_pause_in_real_time_resumes_exactly_where_it_stopped() {
     let audio = call_audio(dir.path(), Some(flac(dir.path(), "a", &data)), None);
     let (cb, rx) = events();
     let captured = Arc::new(Mutex::new(Vec::new()));
-    let p = Player::open(&audio, opener(captured.clone(), true), cb).unwrap();
+    let p = Player::open(&audio, &[], opener(captured.clone(), true), cb).unwrap();
     p.play();
     wait_for(&rx, |e| e.state == PlayState::Playing && e.position_s > 0.6);
     p.pause();
@@ -506,7 +506,7 @@ fn player_reports_a_failing_output_and_stays_usable() {
     let audio = call_audio(dir.path(), Some(flac(dir.path(), "a", &ramp(16_000))), None);
     let (cb, rx) = events();
     let failing: SinkOpener = Arc::new(|_| Err(recorder::Error::BackendUnavailable("no server".into())));
-    let p = Player::open(&audio, failing, cb).unwrap();
+    let p = Player::open(&audio, &[], failing, cb).unwrap();
     p.play();
     let e = wait_for(&rx, |e| e.state == PlayState::Error).pop().unwrap();
     assert_eq!(e.error.unwrap().0, "backend_unavailable");
@@ -624,4 +624,174 @@ fn resolve_tells_apart_deleted_none_missing_and_playable_calls() {
     assert!(audio.mic.is_none() && audio.mic_offset_s == 0.0);
     // e o mixer abre o que foi resolvido
     assert_eq!(audio.open_mixer().unwrap().len(), 16_000);
+}
+
+// ---------------------------------------------------------------- cortes (#23)
+
+use super::skip::CutMap;
+
+/// `data` sem os intervalos `cuts` (em segundos): o que o ouvinte deve ouvir.
+fn without(data: &[i16], cuts: &[(f64, f64)]) -> Vec<i16> {
+    let r = f64::from(RATE);
+    data.iter().enumerate().filter(|(i, _)| !cuts.iter().any(|&(s, e)| *i >= (s * r) as usize && *i < (e * r) as usize)).map(|(_, &v)| v).collect()
+}
+
+#[test]
+fn cut_map_converts_positions_both_ways_and_merges_cuts() {
+    // 1000 amostras; cortes [100,200) e [300,350); sobrepostos e fora da chamada são ajustados
+    let m = CutMap::new(&[(0.0125, 0.025), (0.0375, 0.04375), (0.021, 0.0225), (0.0, 0.0), (9.0, 10.0)], 8000, 1000);
+    assert_eq!(m, CutMap::new(&[(0.0125, 0.025), (0.0375, 0.04375)], 8000, 1000));
+    assert_eq!(m.removed(), 150);
+    assert_eq!((m.to_comp(50), m.to_comp(100), m.to_comp(150), m.to_comp(200), m.to_comp(250), m.to_comp(400)), (50, 100, 100, 100, 150, 250));
+    // a emenda é o fim do corte: chegar a S já é estar em E
+    assert_eq!((m.to_orig(50), m.to_orig(99), m.to_orig(100), m.to_orig(150), m.to_orig(200), m.to_orig(250)), (50, 99, 200, 250, 350, 400));
+    assert_eq!((m.next_start(0), m.next_start(100), m.next_start(250), m.next_start(300)), (Some(100), Some(300), Some(300), None));
+    // ida e volta: toda posição fora dos cortes volta igual
+    for p in (0..1000).filter(|p| !(100..200).contains(p) && !(300..350).contains(p)) {
+        assert_eq!(m.to_orig(m.to_comp(p)), p, "{p}");
+    }
+    assert!(CutMap::default().is_empty() && CutMap::default().to_orig(7) == 7);
+}
+
+fn cut_session(data: &[i16], cuts: &[(f64, f64)]) -> (tempfile::TempDir, Session) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = flac(dir.path(), "a", data);
+    (dir, Session::with_cuts(Mixer::open(Some(&path), None, 0.0).unwrap(), cuts))
+}
+
+#[test]
+fn session_skips_cuts_at_normal_speed_and_the_position_jumps_over_them() {
+    let data = ramp(RATE as usize * 6);
+    let cuts = [(1.0, 2.0), (3.0, 3.5), (5.9, 6.0)];
+    let (_d, mut s) = cut_session(&data, &cuts);
+    assert!((s.duration_s() - 6.0).abs() < 1e-9, "a duração da chamada não muda");
+    assert_eq!(s.len(), RATE as u64 * 6, "len() é o eixo da chamada; o que sai é menor");
+    let mut out = Vec::new();
+    let mut positions = Vec::new();
+    while !s.next_chunk(&mut out, 1234) {
+        positions.push(s.position_s(None));
+    }
+    positions.push(s.position_s(None));
+    assert_eq!(out, without(&data, &cuts), "saiu a chamada sem os cortes, sem emenda");
+    assert!(positions.windows(2).all(|w| w[0] <= w[1]));
+    assert!(positions.iter().all(|&p| !cuts.iter().any(|&(a, b)| p > a + 1e-9 && p < b - 1e-9)), "a posição nunca fica dentro de um corte: {positions:?}");
+    assert!((s.position_s(None) - 6.0).abs() < 1e-3, "o corte final leva ao fim da chamada: {}", s.position_s(None));
+    // no exato começo de um corte a posição já é a do fim dele
+    let (_d, mut s) = cut_session(&data, &cuts);
+    let mut out = Vec::new();
+    s.next_chunk(&mut out, RATE as usize);
+    assert!((s.position_s(None) - 2.0).abs() < 1e-6, "{}", s.position_s(None));
+    assert_eq!(*out.last().unwrap(), data[RATE as usize - 1]);
+    s.next_chunk(&mut out, 1);
+    assert_eq!(*out.last().unwrap(), data[2 * RATE as usize], "a próxima amostra é a do fim do corte");
+}
+
+#[test]
+fn seeking_into_a_cut_lands_at_its_end_and_seeking_elsewhere_is_exact() {
+    let data = ramp(RATE as usize * 6);
+    let (_d, mut s) = cut_session(&data, &[(1.0, 2.0), (3.0, 3.5)]);
+    for (to, lands) in [(1.5, 2.0), (1.0, 2.0), (3.2, 3.5), (0.5, 0.5), (2.0, 2.0), (4.0, 4.0), (99.0, 6.0)] {
+        s.seek_s(to);
+        assert!((s.position_s(None) - lands).abs() < 1e-6, "seek {to}: {}", s.position_s(None));
+        let mut out = Vec::new();
+        s.next_chunk(&mut out, 100);
+        let from = (lands * f64::from(RATE)) as usize;
+        assert_eq!(out, data[from..(from + 100).min(data.len())], "seek {to}: toca a partir de {lands}");
+    }
+}
+
+#[test]
+fn speed_across_cuts_equals_playing_the_pre_concatenated_audio() {
+    let src = tone(440.0, 12_000.0, RATE as usize * 8);
+    let cuts = [(1.0, 2.0), (4.25, 5.0)];
+    let joined = without(&src, &cuts);
+    for speed in [1.5, 2.0, 0.75] {
+        let (_d, mut with_cuts) = cut_session(&src, &cuts);
+        with_cuts.set_speed(speed, 0);
+        let (plain, _) = stretched(&joined, speed);
+        let mut got = Vec::new();
+        assert!(with_cuts.next_chunk(&mut got, 10_000_000));
+        assert_eq!(got, plain, "{speed}×: pular os cortes dá exatamente a saída do áudio já sem eles (sem glitch na emenda)");
+        assert!((with_cuts.position_s(None) - 8.0).abs() < 0.05, "{speed}×: {}", with_cuts.position_s(None));
+    }
+}
+
+#[test]
+fn session_set_cuts_live_keeps_the_listener_in_place() {
+    let data = ramp(RATE as usize * 6);
+    let (_d, mut s) = cut_session(&data, &[]);
+    let mut out = Vec::new();
+    s.next_chunk(&mut out, RATE as usize * 3 / 2); // 1,5 s
+    let at = (s.position_s(None) * f64::from(RATE)) as u64;
+    // um corte novo à frente: a posição continua em 1,5 s e o que sai depois pula o corte
+    s.set_cuts(&[(2.0, 3.0)], at);
+    assert!((s.position_s(None) - 1.5).abs() < 1e-6);
+    let mut rest = Vec::new();
+    s.next_chunk(&mut rest, 10_000_000);
+    assert_eq!(rest, without(&data, &[(2.0, 3.0)])[RATE as usize * 3 / 2..]);
+    // um corte que engole a posição atual: vai para o fim dele
+    s.set_cuts(&[(1.0, 2.0)], (1.5 * f64::from(RATE)) as u64);
+    assert!((s.position_s(None) - 2.0).abs() < 1e-6);
+    // tirar todos: a chamada volta inteira
+    s.set_cuts(&[], 0);
+    let mut all = Vec::new();
+    s.next_chunk(&mut all, 10_000_000);
+    assert_eq!(all, data);
+}
+
+#[test]
+fn player_with_cuts_skips_them_and_events_never_land_inside_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = ramp(RATE as usize * 5);
+    let audio = call_audio(dir.path(), Some(flac(dir.path(), "a", &data)), None);
+    let cuts = [(1.0, 2.0), (3.5, 4.0)];
+    let (cb, rx) = events();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let p = Player::open(&audio, &cuts, opener(captured.clone(), false), cb).unwrap();
+    assert!((p.duration_s - 5.0).abs() < 1e-9);
+    p.play();
+    let seen = wait_for(&rx, |e| e.state == PlayState::Ended);
+    // `data-playing` da UI vem de `state`: Playing ao começar, Ended no fim, sem Error no caminho
+    assert_eq!(seen[0].state, PlayState::Playing);
+    assert!(seen.iter().all(|e| e.state != PlayState::Error && e.error.is_none()));
+    assert!(seen.windows(2).all(|w| w[0].position_s <= w[1].position_s));
+    assert!(seen.iter().all(|e| !cuts.iter().any(|&(a, b)| e.position_s > a + 1e-9 && e.position_s < b - 1e-9)), "{:?}", seen.iter().map(|e| e.position_s).collect::<Vec<_>>());
+    assert_eq!(seen.last().unwrap().position_s, 5.0);
+    assert_eq!(*captured.lock().unwrap(), without(&data, &cuts));
+
+    // pular para dentro de um corte pausado cai no fim dele, e tocar a partir dali
+    captured.lock().unwrap().clear();
+    p.seek(1.4);
+    assert!((wait_for(&rx, |e| e.state == PlayState::Paused).pop().unwrap().position_s - 2.0).abs() < 1e-6);
+    p.set_speed(1.0);
+    p.play();
+    wait_for(&rx, |e| e.state == PlayState::Ended);
+    assert_eq!(*captured.lock().unwrap(), without(&data, &cuts)[(RATE as usize)..]);
+
+    // cortes novos com o player aberto (salvar/remover na tela): valem na hora, sem reabrir
+    p.set_cuts(vec![(0.0, 4.0)]);
+    let e = wait_for(&rx, |e| e.state == PlayState::Paused || e.state == PlayState::Ended).pop().unwrap();
+    assert!(e.position_s >= 4.0 - 1e-6, "{}", e.position_s);
+    captured.lock().unwrap().clear();
+    p.seek(0.0);
+    p.play();
+    wait_for(&rx, |e| e.state == PlayState::Ended);
+    assert_eq!(*captured.lock().unwrap(), data[4 * RATE as usize..]);
+    p.close();
+}
+
+#[test]
+fn player_with_cuts_and_speed_plays_a_shorter_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let audio = call_audio(dir.path(), Some(flac(dir.path(), "a", &tone(440.0, 9000.0, RATE as usize * 8))), None);
+    let (cb, rx) = events();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let p = Player::open(&audio, &[(2.0, 4.0)], opener(captured.clone(), false), cb).unwrap();
+    p.set_speed(2.0);
+    wait_for(&rx, |e| e.speed == 2.0);
+    p.play();
+    wait_for(&rx, |e| e.state == PlayState::Ended);
+    let n = captured.lock().unwrap().len() as f64;
+    assert!((n - 48_000.0).abs() < 1600.0, "6 s de áudio a 2× = 3 s: {n}");
+    p.close();
 }

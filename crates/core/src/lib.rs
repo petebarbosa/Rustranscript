@@ -2,6 +2,7 @@
 //! leitura, edição com histórico, busca e conversão de áudio. Sem dependência de UI.
 pub mod app;
 pub mod audio;
+pub mod cuts;
 pub mod db;
 pub mod error;
 pub mod fsx;

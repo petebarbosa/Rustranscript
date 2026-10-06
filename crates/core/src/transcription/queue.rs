@@ -219,7 +219,10 @@ pub fn enqueue(app: &App, library_id: i64, call_id: i64, kind: JobKind, options:
             }
         }
     }
-    let id = insert_job(app, library_id, call_id, &key, kind, options, base)?;
+    // instantâneo dos cortes de áudio: editar cortes depois não muda uma tarefa já criada
+    let mut options = options.clone();
+    options.cuts = lib.effective_cuts(call_id)?;
+    let id = insert_job(app, library_id, call_id, &key, kind, &options, base)?;
     lib.conn.execute(
         "UPDATE calls SET transcription_state = 'pending', transcription_error = NULL
          WHERE id = ?1 AND transcription_state = 'failed' AND NOT EXISTS (SELECT 1 FROM transcripts WHERE call_id = calls.id)",

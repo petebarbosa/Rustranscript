@@ -3,11 +3,15 @@
 import { mockIPC } from '@tauri-apps/api/mocks'
 import { emit } from '@tauri-apps/api/event'
 import { TRANSCRIPTION_DEFAULTS } from './api'
-import type { ApplyReport, AudioDeletion, AudioEntry, BleedRemoval, BlockChange, BlockInfo, BlocksChange, BlockSuggestion, CallDetail, ClientInfo, DeviceInfo, GlossaryImportEntry, HistoryEntry, Hit, JobInfo, JobKind, JobOptions, JobProgress, JobStage, LibraryInfo, LevelsEvent, ModelStatus, PauseReason, QueueStatus, Orphan, RecordingInfo, RecordStatus, Rule, SpeakerInfo, StreamChoice, StreamLevel, StreamStatus } from './api'
+import type { ApplyReport, AudioDeletion, AudioEntry, BleedRemoval, AudioCut, BlockChange, BlockInfo, BlocksChange, CutsChange, BlockSuggestion, CallDetail, ClientInfo, DeviceInfo, GlossaryImportEntry, HistoryEntry, Hit, JobInfo, JobKind, JobOptions, JobProgress, JobStage, LibraryInfo, LevelsEvent, ModelStatus, PauseReason, QueueStatus, Orphan, RecordingInfo, RecordStatus, Rule, SpeakerInfo, StreamChoice, StreamLevel, StreamStatus } from './api'
 
 type Args = Record<string, any>
 
-interface Call extends Omit<CallDetail, 'library_name' | 'words' | 'preview' | 'edited_blocks' | 'transcript_id' | 'deleted_blocks'> {
+/** Corte guardado como no banco: removido = `removed` (o histórico aponta para ele por id e o desfazer o traz de volta). */
+interface CutRow { id: number; t_start: number; t_end: number; block_id: number | null; created_at: string; removed: boolean }
+
+interface Call extends Omit<CallDetail, 'library_name' | 'words' | 'preview' | 'edited_blocks' | 'transcript_id' | 'deleted_blocks' | 'cuts'> {
+  cutRows?: CutRow[]
   /** null = chamada recém-gravada, sem transcrição (RECORDING_CONTRACT §5) */
   transcript_id: number | null
   /** blocos/falantes das versões inativas, por id de transcrição (trocados por set_active_transcript) */
@@ -34,7 +38,7 @@ function mkCall(library_id: number, id: number, key: string, title: string, clie
     return s.id
   }
   const blocks: BlockInfo[] = lines.map(([t, spk, text], i) => ({
-    id: ++seq, seq: i + 1, t_start: t, t_end: t, speaker_id: sid(spk), text, original_text: text, edited: false, deleted_at: null,
+    id: ++seq, seq: i + 1, t_start: t, t_end: i + 1 < lines.length ? Math.max(t + 1, Math.min(lines[i + 1][0] - 1, t + 30)) : t + 25, speaker_id: sid(spk), text, original_text: text, edited: false, deleted_at: null,
   }))
   const date = key.slice(5, 15), time = key.slice(16).replace(/-/g, ':')
   return {
@@ -129,10 +133,10 @@ function summary(c: Call) {
   const words = live(c).reduce((n, b) => n + b.text.split(/\s+/).filter(Boolean).length, 0)
   const preview = live(c).slice(0, 3).map(b => b.text).join(' ').slice(0, 200)
   const client = clients.find(x => x.id === c.client_id)
-  const { speakers: _s, blocks: _b, chapters: _c, transcripts: _t, audio: _a, other: _o, ...rest } = c
+  const { speakers: _s, blocks: _b, chapters: _c, transcripts: _t, audio: _a, other: _o, cutRows: _cr, ...rest } = c
   return { ...rest, client_name: client?.name ?? null, words, preview, edited_blocks: live(c).filter(b => b.edited).length }
 }
-function record(library_id: number, call_id: number, entity: HistoryEntry['entity'], entity_id: number, old_value: string | null, new_value: string | null, batch?: { id: number; size: number; kind?: 'glossary' | 'delete' | 'restore' }) {
+function record(library_id: number, call_id: number, entity: HistoryEntry['entity'], entity_id: number, old_value: string | null, new_value: string | null, batch?: { id: number; size: number; kind?: 'glossary' | 'delete' | 'restore' | 'cut_add' | 'cut_remove' }) {
   const id = ++seq
   history.push({
     library_id, id, call_id, entity, entity_id, old_value, new_value, origin: 'ui', at: now(), undone_at: null,
@@ -140,20 +144,125 @@ function record(library_id: number, call_id: number, entity: HistoryEntry['entit
   })
   return id
 }
-/** delete_blocks/restore_blocks: lote único no histórico; idempotente (já no estado pedido = `unchanged`) */
+// ---- cortes de áudio (#23): as mesmas regras do núcleo (cuts.rs)
+type Span = [number, number]
+const MIN_COVERAGE = 0.5
+const cutRows = (c: Call) => (c.cutRows ??= [])
+const liveRows = (c: Call) => cutRows(c).filter(r => !r.removed)
+const mergeSpans = (v: Span[]): Span[] => {
+  const out: Span[] = []
+  for (const [s, e] of [...v].sort((a, b) => a[0] - b[0] || a[1] - b[1])) {
+    const last = out[out.length - 1]
+    if (last && s <= last[1]) last[1] = Math.max(last[1], e)
+    else out.push([s, e])
+  }
+  return out
+}
+const covered = (m: Span[], a: number, b: number) => m.reduce((n, [s, e]) => n + Math.max(0, Math.min(b, e) - Math.max(a, s)), 0)
+/** Metade ou mais da duração dentro dos cortes (bloco sem duração: vale o instante). */
+const isCovered = (m: Span[], a: number, b: number) => (b <= a ? m.some(([s, e]) => a >= s && a < e) : covered(m, a, b) >= (b - a) * MIN_COVERAGE - 1e-9)
+const subtractSpans = (m: Span[], [s, e]: Span): Span[] => {
+  const out: Span[] = []
+  let at = s
+  for (const [ms, me] of m) {
+    if (me <= at || ms >= e) continue
+    if (ms > at) out.push([at, ms])
+    at = Math.max(at, me)
+  }
+  if (at < e) out.push([at, e])
+  return out
+}
+const round3 = (v: number) => Math.round(v * 1000) / 1000
+const toCut = (c: Call, r: CutRow): AudioCut => ({
+  id: r.id, t_start: r.t_start, t_end: r.t_end, block_id: r.block_id,
+  block_seq: r.block_id == null ? null : c.blocks.find(b => b.id === r.block_id)?.seq ?? null, created_at: r.created_at,
+})
+const cutList = (c: Call) => liveRows(c).sort((a, b) => a.t_start - b.t_start || a.id - b.id).map(r => toCut(c, r))
+const unionOf = (rows: CutRow[]) => mergeSpans(rows.map(r => [r.t_start, r.t_end] as Span))
+function audioProblem(c: Call) {
+  if (c.audio.deleted_at) throw bad('audio_deleted', c.key)
+  if (!c.audio.mic_path && !c.audio.sys_path) throw bad('no_audio', c.key)
+}
+/** A exclusão veio de um salvamento de cortes? (o último `block_deleted` válido do bloco está num lote `cut_add`) */
+function deletedByCut(library_id: number, c: Call, block_id: number) {
+  const h = history.filter(x => x.library_id === library_id && x.call_id === c.id && x.entity === 'block_deleted' && x.entity_id === block_id && !x.undone_at).pop()
+  return !!h && h.new_value != null && h.batch_kind === 'cut_add'
+}
+const asBatch = (n: number, kind: 'delete' | 'restore' | 'cut_add' | 'cut_remove') => (n ? { id: ++seq, size: n, kind } : undefined)
+
+/** Calcula e (se `write`) grava `add_cuts`: pedidos fundidos e ajustados à chamada, cortados pelos cortes manuais que já existem,
+ * e exclusão dos trechos com metade ou mais dentro da união de todos os cortes, num lote só. */
+function addCuts(a: Args, write: boolean): CutsChange {
+  const c = findCall(a.libraryId, a.callId)
+  audioProblem(c)
+  const limit = Math.max(c.duration_s, ...c.blocks.map(b => b.t_end))
+  const req = (a.spans as Span[])
+  if (!req.length) throw bad('invalid', 'no cuts given')
+  const spans = mergeSpans(req.map(([s, e]) => {
+    if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) throw bad('invalid', `cut ${s}..${e}`)
+    if (s >= limit) throw bad('invalid', `cut ${s}..${e} is past the end of the call`)
+    return [round3(Math.max(0, s)), round3(Math.min(limit, e))] as Span
+  }))
+  const manual = mergeSpans(liveRows(c).filter(r => r.block_id == null).map(r => [r.t_start, r.t_end] as Span))
+  const fresh: Span[] = [], skipped: Span[] = []
+  for (const sp of spans) { const rest = subtractSpans(manual, sp); if (rest.length) fresh.push(...rest); else skipped.push(sp) }
+  const union = mergeSpans([...unionOf(liveRows(c)), ...fresh])
+  const gone = live(c).filter(b => isCovered(union, b.t_start, b.t_end))
+  const batch = asBatch(fresh.length + gone.length, 'cut_add')
+  const added: AudioCut[] = []
+  if (write && batch) {
+    for (const [s, e] of fresh) {
+      const r: CutRow = { id: ++seq, t_start: s, t_end: e, block_id: null, created_at: now(), removed: false }
+      cutRows(c).push(r)
+      record(a.libraryId, c.id, 'audio_cut', r.id, r.created_at, null, batch)
+      added.push(toCut(c, r))
+    }
+    for (const b of gone) { b.deleted_at = now(); record(a.libraryId, c.id, 'block_deleted', b.id, null, b.deleted_at, batch) }
+  } else added.push(...fresh.map(([s, e], i) => ({ id: -(i + 1), t_start: s, t_end: e, block_id: null, block_seq: null, created_at: now() })))
+  const after: AudioCut[] = write ? cutList(c) : [...cutList(c), ...added].sort((x, y) => x.t_start - y.t_start)
+  return { call_id: c.id, added, removed: [], skipped, deleted_blocks: gone.map(b => ({ ...b })), restored_blocks: [], cuts: after }
+}
+
+function removeCut(a: Args): CutsChange {
+  const c = findCall(a.libraryId, a.callId)
+  const row = liveRows(c).find(r => r.id === a.cutId)
+  if (!row) throw bad('not_found', `cut ${a.cutId}`)
+  if (row.block_id != null && c.blocks.some(b => b.id === row.block_id)) throw bad('conflict', `cut ${a.cutId} belongs to a deleted passage: restore the passage instead`)
+  const rest = unionOf(liveRows(c).filter(r => r !== row))
+  const back = c.blocks.filter(b => b.deleted_at && deletedByCut(a.libraryId, c, b.id) && !isCovered(rest, b.t_start, b.t_end))
+  const batch = asBatch(1 + back.length, 'cut_remove')!
+  row.removed = true
+  record(a.libraryId, c.id, 'audio_cut', row.id, null, now(), batch)
+  for (const b of back) { const old = b.deleted_at; b.deleted_at = null; record(a.libraryId, c.id, 'block_deleted', b.id, old, null, batch) }
+  return { call_id: c.id, added: [], removed: [toCut(c, row)], skipped: [], deleted_blocks: [], restored_blocks: back.map(b => ({ ...b })), cuts: cutList(c) }
+}
+
+/** delete_blocks/restore_blocks: lote único no histórico; idempotente (já no estado pedido = `unchanged`).
+ * Excluir cria um corte ligado a cada trecho (se a chamada tem áudio); restaurar tira os cortes ligados. */
 function setDeleted(a: Args, del: boolean): BlocksChange {
   const ids = [...new Set<number>(a.blockIds)]
   if (!ids.length) throw { code: 'invalid', detail: 'no blocks given' }
   const found = ids.map(id => findBlock(a.libraryId, id)) // um id ruim desfaz tudo (nada foi gravado ainda)
   const todo = found.filter(({ b }) => !!b.deleted_at !== del)
-  const batch = todo.length ? { id: ++seq, size: todo.length, kind: del ? 'delete' as const : 'restore' as const } : undefined
-  const out: BlocksChange = { changed: [], unchanged: [] }
+  const hasAudio = (c: Call) => !c.audio.deleted_at && !!(c.audio.mic_path || c.audio.sys_path)
+  const linked = (c: Call, b: BlockInfo) => liveRows(c).filter(r => r.block_id === b.id)
+  const nCuts = todo.reduce((n, { c, b }) => n + (del ? (hasAudio(c) && b.t_end > b.t_start ? 1 : 0) : linked(c, b).length), 0)
+  const batch = asBatch(todo.length + nCuts, del ? 'delete' : 'restore')
+  const out: BlocksChange = { changed: [], unchanged: [], cuts_added: [], cuts_removed: [] }
   for (const { c, b } of found) {
     if (!!b.deleted_at === del) { out.unchanged.push({ ...b }); continue }
     const old = b.deleted_at
     b.deleted_at = del ? now() : null
     record(a.libraryId, c.id, 'block_deleted', b.id, old, b.deleted_at, batch)
     out.changed.push({ ...b })
+    if (del && hasAudio(c) && b.t_end > b.t_start) {
+      const r: CutRow = { id: ++seq, t_start: b.t_start, t_end: b.t_end, block_id: b.id, created_at: now(), removed: false }
+      cutRows(c).push(r)
+      record(a.libraryId, c.id, 'audio_cut', r.id, r.created_at, null, batch)
+      out.cuts_added.push(toCut(c, r))
+    } else if (!del) {
+      for (const r of linked(c, b)) { r.removed = true; record(a.libraryId, c.id, 'audio_cut', r.id, null, now(), batch); out.cuts_removed.push(toCut(c, r)) }
+    }
   }
   return out
 }
@@ -180,9 +289,9 @@ const handlers: Record<string, (a: Args) => unknown> = {
     .map(summary),
   call_detail: a => {
     const c = findCall(a.libraryId, a.callId)
-    const { other: _o, ...full } = c
+    const { other: _o, cutRows: _cr, ...full } = c
     if (a.transcriptId != null && c.transcript_id == null) throw { code: 'not_found', detail: `transcript ${a.transcriptId}` }
-    return { ...full, ...summary(c), library_name: lib(c.library_id).name, blocks: live(c).map(b => ({ ...b })), deleted_blocks: c.blocks.filter(b => b.deleted_at).map(b => ({ ...b })), speakers: c.speakers.map(s => ({ ...s })) }
+    return { ...full, ...summary(c), library_name: lib(c.library_id).name, blocks: live(c).map(b => ({ ...b })), deleted_blocks: c.blocks.filter(b => b.deleted_at).map(b => ({ ...b })), speakers: c.speakers.map(s => ({ ...s })), cuts: cutList(c) }
   },
   set_block_text: a => {
     const { c, b } = findBlock(a.libraryId, a.blockId)
@@ -193,6 +302,9 @@ const handlers: Record<string, (a: Args) => unknown> = {
     if (t !== b.text) { edit_id = record(a.libraryId, c.id, 'block_text', b.id, b.text, t); b.text = t; b.edited = t !== b.original_text }
     return { ...b, edit_id, suggestions: edit_id ? suggest(a.libraryId, c, b.id, old, t) : [] }
   },
+  preview_cuts: a => addCuts(a, false),
+  add_cuts: a => addCuts(a, true),
+  remove_cut: a => removeCut(a),
   delete_blocks: a => setDeleted(a, true),
   restore_blocks: a => setDeleted(a, false),
   revert_block: a => { const { b } = findBlock(a.libraryId, a.blockId); return handlers.set_block_text({ ...a, text: b.original_text }) },
@@ -242,6 +354,7 @@ const handlers: Record<string, (a: Args) => unknown> = {
       if (e.entity === 'speaker_name') c.speakers.find(s => s.id === e.entity_id)!.name = e.old_value
       if (e.entity === 'block_speaker') c.blocks.find(b => b.id === e.entity_id)!.speaker_id = Number(e.old_value)
       if (e.entity === 'block_deleted') c.blocks.find(b => b.id === e.entity_id)!.deleted_at = e.old_value
+      if (e.entity === 'audio_cut') cutRows(c).find(r => r.id === e.entity_id)!.removed = e.old_value != null
       e.undone_at = now()
     }
     return h
@@ -1122,6 +1235,7 @@ const playerHandlers: Record<string, (a: Args) => unknown> = {
     pl.pos = Math.min(pl.dur, Math.max(0, a.seconds)); pl.since = Date.now(); pl.ended = false; plEmit()
   },
   player_speed: a => { if (!pl.lib) throw bad('invalid', 'no call is open in the player'); plSettle(); pl.speed = Math.min(2, Math.max(1, a.speed)); plEmit() },
+  player_set_cuts: () => { /* o motor de verdade relê os cortes do banco; aqui não há som */ },
   player_close: a => { if (pl.lib && (a.libraryId == null || a.libraryId === pl.lib) && (a.callId == null || a.callId === pl.call)) plStop() },
 }
 Object.assign(handlers, playerHandlers)

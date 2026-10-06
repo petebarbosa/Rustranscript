@@ -5,7 +5,7 @@ description: Drive Rustranscript through its `rstt` CLI. Use when asked to recor
 
 `rstt` is the local meeting recorder and transcriber. Calls live in a local data directory; nothing leaves the machine. Run `rstt <cmd> --help` for any flag not listed here.
 
-Add `--json` to every command whose output you parse (`list`, `show`, `search`, `edit`, `history`, `undo`, `glossary`, `queue`, `status`, `setup status`, `audio`). A failure prints `{"error":{"code","message"}}` and exits non-zero.
+Add `--json` to every command whose output you parse (`list`, `show`, `search`, `edit`, `cut`, `history`, `undo`, `glossary`, `queue`, `status`, `setup status`, `audio`). A failure prints `{"error":{"code","message"}}` and exits non-zero.
 
 A call is addressed by its **key**, `call_YYYY-MM-DD_HH-MM-SS`, taken from `rstt list --json`.
 
@@ -30,9 +30,13 @@ Every write is reversible and logged, so edit freely, but always in this order:
 
 Other edits, all with `--dry-run`: `edit title <key> "<title>"`, `edit speaker <key> <label> "<name>"`, `edit block-speaker <key> <seq> <speaker>`, `edit revert <key> <seq>`.
 
-Deleting blocks is soft: `rstt edit delete <key> <seq>... --dry-run`, then without `--dry-run`. The blocks vanish from `show`, `show --text` and `search`, and the other blocks keep their `seq`; the text and audio stay. The result lists `changed` and `unchanged` (already deleted: no error, nothing logged). Deleted blocks appear with their `seq` in `deleted_blocks` of `rstt show <key>` (JSON); `rstt edit restore <key> <seq>...` (also with `--dry-run`) brings them back. A deleted block cannot be edited (`conflict`) until restored.
+Deleting blocks is soft: `rstt edit delete <key> <seq>... --dry-run`, then without `--dry-run`. The blocks vanish from `show`, `show --text` and `search`, and the other blocks keep their `seq`; the text and audio stay. The result lists `changed` and `unchanged` (already deleted: no error, nothing logged). Deleted blocks appear with their `seq` in `deleted_blocks` of `rstt show <key>` (JSON); `rstt edit restore <key> <seq>...` (also with `--dry-run`) brings them back. A deleted block cannot be edited (`conflict`) until restored. Deleting a block also creates one audio cut over its time range (`cuts_added` in the result) and restoring removes it (`cuts_removed`), all in the same change; with no audio on the call no cut is made.
 
-`rstt history <key>` lists changes; `rstt undo <key> --dry-run`, then `rstt undo <key>`, reverts the most recent one (a glossary apply, or one `edit delete`/`edit restore` call, is one change and reverts as a whole).
+### Audio cuts
+
+Cuts remove tangents from the call without touching the FLACs: the player skips them and a later re-transcription ("Refazer", also `--kind rediarize`) treats that audio as silence, keeping timestamps on the original timeline. Cuts are `[start, end)` seconds of the call. `rstt cut list <key>` shows the live cuts (`id`, `t_start`, `t_end`, `duration_s`, `block_seq` when a deleted block produced it); `rstt cut add <key> <start> <end> --dry-run`, then without it, adds one (`<start>`/`<end>` are seconds like `83.5`, `mm:ss` or `hh:mm:ss`; values past the call are clamped; a span already fully cut is `skipped`). Saving a cut deletes every live block with **half or more of its duration** inside the union of all cuts: `--dry-run` lists them in `deleted_blocks` first, so always read it. `rstt cut remove <key> <id>` (also `--dry-run`) removes a manual cut and restores (`restored_blocks`) only the blocks that a cut save deleted and that are no longer half covered; blocks you deleted with `edit delete` never come back that way, and a cut made by `edit delete` is removed by `edit restore`, not by `cut remove` (`conflict`). Cuts need the call's audio (`no_audio`/`audio_deleted` otherwise). There is no point cutting silences: transcription already ignores them and they barely change the time it takes.
+
+`rstt history <key>` lists changes; `rstt undo <key> --dry-run`, then `rstt undo <key>`, reverts the most recent one (a glossary apply, or one `edit delete`/`edit restore`/`cut add`/`cut remove` call, is one change and reverts as a whole, cuts and passages together).
 
 ## Glossary
 

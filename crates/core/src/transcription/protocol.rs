@@ -23,6 +23,11 @@ pub enum ToWorker {
         word_timestamps: bool,
         vad_min_silence_ms: u32,
         start_s: f64,
+        /// Cortes de áudio (#23): intervalos `(início, fim)` em segundos **do arquivo da trilha** que o worker
+        /// zera logo depois de decodificar, antes de qualquer processamento. Os tempos emitidos continuam os do
+        /// arquivo (nada é fatiado nem concatenado). Ausente/vazio = áudio inteiro.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mute: Vec<(f64, f64)>,
     },
     /// Agrupa os falantes de uma trilha (segmentação pyannote + embedding CAM++ + clustering).
     Diarize {
@@ -34,9 +39,19 @@ pub enum ToWorker {
         num_clusters: Option<u32>,
         threshold: f64,
         threads: u32,
+        /// Como em `Transcribe`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mute: Vec<(f64, f64)>,
     },
-    /// Envelope de energia: dBFS (RMS) por passo de `step_ms`.
-    Energy { id: String, audio: String, step_ms: u32 },
+    /// Envelope de energia: dBFS (RMS) por passo de `step_ms` (o que foi zerado vira o piso, -120 dB).
+    Energy {
+        id: String,
+        audio: String,
+        step_ms: u32,
+        /// Como em `Transcribe`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mute: Vec<(f64, f64)>,
+    },
     /// Cancelamento cooperativo: o worker termina a janela corrente e responde `cancelled` (até ~12 s).
     Cancel { id: String },
     Shutdown,
@@ -136,17 +151,23 @@ mod tests {
 
     #[test]
     fn wire_format_v1() {
-        let m = ToWorker::Energy { id: "j-1".into(), audio: "/a.flac".into(), step_ms: 100 };
+        let m = ToWorker::Energy { id: "j-1".into(), audio: "/a.flac".into(), step_ms: 100, mute: vec![] };
         assert_eq!(to_line(&m), r#"{"type":"energy","id":"j-1","audio":"/a.flac","step_ms":100}"#);
         assert_eq!(to_line(&ToWorker::Shutdown), r#"{"type":"shutdown"}"#);
         let t = ToWorker::Transcribe {
             id: "j-2".into(), audio: "/s.flac".into(), track: "sys".into(), model_dir: "/m".into(), language: None,
-            hotwords: Some("a, b".into()), beam_size: 5, threads: 4, word_timestamps: true, vad_min_silence_ms: 500, start_s: 12.5,
+            hotwords: Some("a, b".into()), beam_size: 5, threads: 4, word_timestamps: true, vad_min_silence_ms: 500, start_s: 12.5, mute: vec![(1.0, 2.5)],
         };
         let v: serde_json::Value = serde_json::from_str(&to_line(&t)).unwrap();
         assert_eq!(v["type"], "transcribe");
         assert!(v["language"].is_null());
         assert_eq!(v["start_s"], 12.5);
+        assert_eq!(v["mute"], serde_json::json!([[1.0, 2.5]]));
+        // sem cortes o campo nem vai no fio (o formato v1 de antes não muda) e a leitura aceita sem ele
+        let e = ToWorker::Energy { id: "j-1".into(), audio: "/a.flac".into(), step_ms: 100, mute: vec![] };
+        assert!(!to_line(&e).contains("mute"));
+        let back: ToWorker = serde_json::from_str(r#"{"type":"energy","id":"x","audio":"/a","step_ms":50}"#).unwrap();
+        assert_eq!(back, ToWorker::Energy { id: "x".into(), audio: "/a".into(), step_ms: 50, mute: vec![] });
     }
 
     #[test]

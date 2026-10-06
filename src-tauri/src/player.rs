@@ -7,6 +7,9 @@
 //! - `player_peaks`: a onda sonora, em `buckets` valores 0–255. Roda **fora** da trava do banco: a 1ª vez em uma
 //!   chamada de 2 h decodifica tudo (alguns segundos); depois vem do `peaks.bin` ao lado do áudio.
 //! - `player_play`/`pause`/`seek`/`speed`/`close`: só mandam comandos ao motor.
+//! - Cortes (#23): o player não toca os trechos cortados. `player_open` os lê do banco; depois de qualquer mudança
+//!   (salvar/remover corte, excluir/restaurar trecho, desfazer) a UI chama `player_set_cuts`, que relê e atualiza o
+//!   motor aberto sem mexer onde o ouvinte está.
 //! - Evento `player-position` (~10 Hz tocando; a cada comando): `PositionEvent`.
 use std::sync::{Arc, Mutex};
 
@@ -79,13 +82,14 @@ pub fn player_open(handle: AppHandle, state: State<AppState>, pl: State<PlayerSt
         Ok(a) => a,
         Err(why) => return Ok(PlayerInfo { available: false, reason: Some(why.code()), duration_s: 0.0 }),
     };
+    let cuts = effective_cuts(&state, library_id, call_id)?;
     let emit = {
         let handle = handle.clone();
         Arc::new(move |event: PlayerEvent| {
             let _ = handle.emit(EV_POSITION, PositionEvent { library_id, call_id, event });
         })
     };
-    let player = Player::open(&audio, recorder::default_sink_opener(), emit).map_err(|e| match e {
+    let player = Player::open(&audio, &cuts, recorder::default_sink_opener(), emit).map_err(|e| match e {
         // arquivo ilegível/cortado: a UI mostra como erro de áudio, não como "sem áudio"
         Error::Audio(d) => CmdError { code: "audio_decode".into(), detail: d },
         other => other.into(),
@@ -93,6 +97,22 @@ pub fn player_open(handle: AppHandle, state: State<AppState>, pl: State<PlayerSt
     let info = PlayerInfo { available: true, reason: None, duration_s: player.duration_s };
     *pl.cur.lock().unwrap_or_else(|e| e.into_inner()) = Some(Open { library_id, call_id, player });
     Ok(info)
+}
+
+/// Cortes vivos da chamada, já fundidos (o que o player e o worker usam).
+fn effective_cuts(state: &State<AppState>, library_id: i64, call_id: i64) -> R<Vec<(f64, f64)>> {
+    with_app(state, |app| app.open_library(library_id)?.effective_cuts(call_id))
+}
+
+/// Relê os cortes da chamada e os aplica ao player aberto (se for dela). Sem player aberto não é erro.
+#[tauri::command(async)]
+pub fn player_set_cuts(state: State<AppState>, pl: State<PlayerState>, library_id: i64, call_id: i64) -> R<()> {
+    let open = pl.cur.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|o| o.library_id == library_id && o.call_id == call_id);
+    if !open {
+        return Ok(());
+    }
+    let cuts = effective_cuts(&state, library_id, call_id)?;
+    pl.with(|p| p.set_cuts(cuts))
 }
 
 #[tauri::command(async)]

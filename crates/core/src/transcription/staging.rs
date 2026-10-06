@@ -227,6 +227,34 @@ pub fn clone_raw(lib: &mut Library, from_job: i64, to_job: i64, with_turns: bool
     Ok(())
 }
 
+/// Tira do bruto de `job_id` os segmentos de que pelo menos metade da duração cai dentro dos `cuts` (tempo da
+/// chamada; o mic é deslocado por `offset_s`, como na montagem). Mesma regra de `cuts::is_covered`.
+pub fn drop_cut_segments(lib: &mut Library, job_id: i64, cuts: &[(f64, f64)], offset_s: f64) -> Result<usize> {
+    let merged = crate::cuts::merge(cuts);
+    if merged.is_empty() {
+        return Ok(0);
+    }
+    let tx = lib.conn.transaction()?;
+    let doomed: Vec<(String, i64)> = {
+        let mut st = tx.prepare("SELECT track, seq, t_start, t_end FROM tx_segments WHERE job_id = ?1")?;
+        let rows = st.query_map([job_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, f64>(2)?, r.get::<_, f64>(3)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (track, seq, a, b) = row?;
+            let shift = if track == "mic" { offset_s } else { 0.0 };
+            if crate::cuts::is_covered(&merged, a + shift, b + shift) {
+                out.push((track, seq));
+            }
+        }
+        out
+    };
+    for (track, seq) in &doomed {
+        tx.execute("DELETE FROM tx_segments WHERE job_id = ?1 AND track = ?2 AND seq = ?3", params![job_id, track, seq])?;
+    }
+    tx.commit()?;
+    Ok(doomed.len())
+}
+
 pub(crate) fn delete_rows(conn: &rusqlite::Connection, job_id: i64) -> Result<()> {
     for t in TABLES {
         conn.execute(&format!("DELETE FROM {t} WHERE job_id = ?1"), [job_id])?;

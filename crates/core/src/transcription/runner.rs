@@ -233,6 +233,8 @@ impl Run<'_> {
         if job.kind != JobKind::Full && !staging::has_raw(&self.lib, job.id)? {
             let base = job.base_job_id.ok_or_else(|| Error::transcription("no_raw_data", "job without base raw data"))?;
             staging::clone_raw(&mut self.lib, base, job.id, job.kind == JobKind::Resegment)?;
+            // o bruto de partida pode ser de antes dos cortes: o que cai dentro deles não vira trecho da versão nova
+            staging::drop_cut_segments(&mut self.lib, job.id, &job.options.cuts, call.offset_s)?;
         }
 
         if job.kind != JobKind::Resegment {
@@ -276,6 +278,7 @@ impl Run<'_> {
                         word_timestamps: track == Track::Sys,
                         vad_min_silence_ms: params.vad_min_silence_ms,
                         start_s: staging::resume_point(&self.lib, job.id, track)?,
+                        mute: track_mute(&job.options.cuts, track, call.offset_s),
                     };
                     let Some(res) = self.call(engine, &req, Some(track), stage)? else { continue };
                     let FromWorker::Result { segments, seconds, language, .. } = res else {
@@ -291,7 +294,12 @@ impl Run<'_> {
                 for (track, audio) in [(Track::Sys, &call.sys), (Track::Mic, &call.mic)] {
                     let Some(audio) = audio else { continue };
                     stop!();
-                    let req = ToWorker::Energy { id: key(&format!("energy-{}", track.as_str())), audio: path(audio), step_ms: ENERGY_STEP_MS };
+                    let req = ToWorker::Energy {
+                        id: key(&format!("energy-{}", track.as_str())),
+                        audio: path(audio),
+                        step_ms: ENERGY_STEP_MS,
+                        mute: track_mute(&job.options.cuts, track, call.offset_s),
+                    };
                     let Some(res) = self.call(engine, &req, None, Stage::Energy)? else { continue };
                     let FromWorker::Result { step_ms, db: Some(db), .. } = res else {
                         return Err(Error::transcription("worker_protocol", "energy without result"));
@@ -315,6 +323,7 @@ impl Run<'_> {
                     num_clusters,
                     threshold: params.diarization_threshold,
                     threads: params.threads,
+                    mute: track_mute(&job.options.cuts, Track::Sys, call.offset_s),
                 };
                 if let Some(res) = self.call(engine, &req, None, Stage::Diarize)? {
                     let FromWorker::Result { turns: Some(turns), speakers, .. } = res else {
@@ -383,6 +392,13 @@ impl Run<'_> {
         let rows = stmt.query_map([self.job.call_id], |r| Ok(PrevBlock { label: r.get(0)?, t_start: r.get(1)?, t_end: r.get(2)? }))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
+}
+
+/// Cortes (tempo da chamada, o do sys) → intervalos a zerar no arquivo da trilha: o mic entra deslocado pelo
+/// `offset_s` na montagem, então o instante do arquivo dele é o da chamada menos o deslocamento.
+fn track_mute(cuts: &[(f64, f64)], track: Track, offset_s: f64) -> Vec<(f64, f64)> {
+    let shift = if track == Track::Mic { offset_s } else { 0.0 };
+    cuts.iter().map(|&(s, e)| ((s - shift).max(0.0), e - shift)).filter(|&(s, e)| e > s).collect()
 }
 
 /// Passo da fila: `recover`/`next_queued` → `mark_running` → `run_job` → desfecho no banco:

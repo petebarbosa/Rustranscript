@@ -314,4 +314,46 @@ CREATE TRIGGER blocks_au AFTER UPDATE OF text, deleted_at ON blocks BEGIN
     INSERT INTO blocks_fts(blocks_fts, rowid, text) SELECT 'delete', old.id, old.text WHERE old.deleted_at IS NULL;
     INSERT INTO blocks_fts(rowid, text) SELECT new.id, new.text WHERE new.deleted_at IS NULL;
 END;
+"#,
+// 6 (#23): cortes de áudio. Intervalos `[t_start, t_end)` na linha do tempo ORIGINAL da chamada (a mesma dos
+// blocos), valem para mic e sys ao mesmo tempo; os FLACs nunca são alterados. Cortes sobrepostos ou colados NÃO
+// são fundidos na escrita: cada um guarda a própria identidade (desfazer, `block_id`) e a união é feita na
+// leitura. `block_id` preenchido = corte criado ao excluir aquele bloco (restaurar o bloco o remove); NULL =
+// corte manual. Nada é apagado de fato: `removed_at` preenchido = corte fora de uso, assim desfazer só
+// troca esse campo (como `deleted_at` dos blocos). O `entity` do histórico ganha 'audio_cut' (old/new = o
+// `removed_at` de antes/depois; ao criar, old = o instante da criação, "ainda não existia" = removido); o CHECK
+// é refeito como na migração 5. O motivo de um bloco estar excluído (corte salvo x exclusão direta) não vira
+// coluna: sai do `batch_kind` ('cut_add') da última entrada 'block_deleted' não desfeita do bloco.
+r#"
+CREATE TABLE audio_cuts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    call_id     INTEGER NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
+    t_start     REAL NOT NULL,
+    t_end       REAL NOT NULL CHECK (t_end > t_start),
+    block_id    INTEGER REFERENCES blocks(id) ON DELETE SET NULL,
+    created_at  TEXT NOT NULL,
+    removed_at  TEXT
+);
+CREATE INDEX audio_cuts_call ON audio_cuts(call_id, t_start) WHERE removed_at IS NULL;
+CREATE INDEX audio_cuts_block ON audio_cuts(block_id) WHERE block_id IS NOT NULL;
+
+CREATE TABLE edit_history_new (
+    id         INTEGER PRIMARY KEY,
+    call_id    INTEGER NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
+    entity     TEXT NOT NULL CHECK (entity IN ('block_text', 'block_speaker', 'call_title', 'speaker_name', 'block_deleted', 'audio_cut')),
+    entity_id  INTEGER NOT NULL,
+    old_value  TEXT,
+    new_value  TEXT,
+    origin     TEXT NOT NULL CHECK (origin IN ('ui', 'cli', 'import')),
+    at         TEXT NOT NULL,
+    undone_at  TEXT,
+    batch_id   INTEGER,
+    batch_kind TEXT
+);
+INSERT INTO edit_history_new (id, call_id, entity, entity_id, old_value, new_value, origin, at, undone_at, batch_id, batch_kind)
+    SELECT id, call_id, entity, entity_id, old_value, new_value, origin, at, undone_at, batch_id, batch_kind FROM edit_history;
+DROP TABLE edit_history;
+ALTER TABLE edit_history_new RENAME TO edit_history;
+CREATE INDEX edit_history_call ON edit_history(call_id, id);
+CREATE INDEX edit_history_batch ON edit_history(batch_id) WHERE batch_id IS NOT NULL;
 "#];

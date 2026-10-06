@@ -35,7 +35,7 @@ fn real_bootstrap_installs_a_working_runtime() {
     let mut engine = ProcessEngine::spawn(WorkerLaunch { python: p.python.clone(), script: p.worker.clone(), fake: false, low_priority: true, kill_after_s: 20 }).unwrap();
     let Some(FromWorker::Hello { faster_whisper, sherpa_onnx, fake, .. }) = engine.hello().cloned() else { panic!("no hello") };
     assert!(!fake && faster_whisper.is_some() && sherpa_onnx.is_some());
-    let t = engine.execute(&ToWorker::Energy { id: "e".into(), audio: audio.display().to_string(), step_ms: 100 }, &mut |_| Flow::Continue).unwrap();
+    let t = engine.execute(&ToWorker::Energy { id: "e".into(), audio: audio.display().to_string(), step_ms: 100, mute: vec![] }, &mut |_| Flow::Continue).unwrap();
     let Terminal::Result(FromWorker::Result { db: Some(db), .. }) = t else { panic!("no energy result") };
     assert!((29..=31).contains(&db.len()), "{} steps", db.len());
     assert!(db.iter().all(|d| *d > -30.0 && *d < 0.0));

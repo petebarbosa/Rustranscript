@@ -96,7 +96,10 @@ impl Engine {
         let mut compiled = Vec::with_capacity(rules.len());
         for rule in rules {
             let re = build_regex(&rule.pattern, rule.case_sensitive)?;
-            let guard = if re.is_match(&rule.replacement) { Some(build_regex(&rule.replacement, rule.case_sensitive)?) } else { None };
+            // regra só de caixa (`kelvaris` → `Kelvaris`): a substituição casa o próprio padrão, mas
+            // não há o que "já resolvido" proteger; o que já está na caixa certa não conta (`apply`)
+            let case_only = norm_key(&rule.pattern) == norm_key(&rule.replacement);
+            let guard = if !case_only && re.is_match(&rule.replacement) { Some(build_regex(&rule.replacement, rule.case_sensitive)?) } else { None };
             compiled.push(Compiled { rule: rule.clone(), re, guard });
         }
         Ok(Engine { rules: compiled })
@@ -460,6 +463,21 @@ mod tests {
         // regra que não muda nada não conta como troca
         let a = apply_rules("API", &[ReplaceRule::new("api", "API", false)]).unwrap();
         assert_eq!((a.text.as_str(), a.replacements()), ("API", 0));
+    }
+
+    #[test]
+    fn case_only_rule_applies_and_skips_what_is_already_right() {
+        let r = [ReplaceRule::new("kelvaris", "Kelvaris", false)];
+        let a = apply_rules("o kelvaris caiu; o Kelvaris voltou", &r).unwrap();
+        assert_eq!(a.text, "o Kelvaris caiu; o Kelvaris voltou");
+        assert_eq!(a.replacements(), 1, "o que já está na caixa certa não conta");
+        // só o que já está certo: nenhuma troca, nenhum acerto
+        let a = apply_rules("o Kelvaris voltou", &r).unwrap();
+        assert_eq!((a.text.as_str(), a.replacements(), a.hits.len()), ("o Kelvaris voltou", 0, 0));
+        // regra que diferencia caixa
+        let r = [ReplaceRule::new("kelvaris", "Kelvaris", true)];
+        let a = apply_rules("kelvaris e Kelvaris", &r).unwrap();
+        assert_eq!((a.text.as_str(), a.replacements()), ("Kelvaris e Kelvaris", 1));
     }
 
     #[test]

@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tauri::{Emitter, Manager, State};
 
 use crate::i18n::Lang;
-use crate::{ipc, recording, shell, shortcut, transcription, tray};
+use crate::{ipc, player, recording, shell, shortcut, transcription, tray};
 
 pub(crate) struct AppState {
     pub(crate) data_dir: PathBuf,
@@ -494,6 +494,7 @@ pub fn run(data_dir: Option<PathBuf>) {
         .plugin(shortcut::plugin())
         .manage(AppState { data_dir: data_dir.clone(), app: Mutex::new(app) })
         .manage(recording::RecState::new())
+        .manage(player::PlayerState::new())
         .manage(transcription::TxState::new())
         .on_window_event(shell::on_window_event)
         .setup(move |app| {
@@ -552,6 +553,13 @@ pub fn run(data_dir: Option<PathBuf>) {
             glossary_import_file,
             glossary_suggestions,
             glossary_prompt_terms,
+            player::player_open,
+            player::player_peaks,
+            player::player_play,
+            player::player_pause,
+            player::player_seek,
+            player::player_speed,
+            player::player_close,
             recording::record_info,
             recording::record_devices,
             recording::record_status,

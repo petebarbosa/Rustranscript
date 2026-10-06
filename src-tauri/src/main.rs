@@ -7,6 +7,7 @@ mod gui;
 mod help;
 mod i18n;
 mod ipc;
+mod player;
 mod recording;
 mod shell;
 mod shortcut;

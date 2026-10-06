@@ -585,7 +585,7 @@ fn to_json<T: serde::Serialize>(v: T) -> core_lib::Result<Value> {
 // ------------------------------------------------------------------ gravação (fase 3)
 //
 // A CLI nunca captura áudio: fala com a GUI pelo socket (`ipc`). Saída padrão: uma linha de texto
-// traduzida (`gravando: <título>` / `parado: <chave>` / `idle` / `recording mm:ss <título>`);
+// traduzida (`gravando: <título>` / `parado: <chave>` / `parado` / `gravando mm:ss <título>`);
 // `--json` devolve o `Status` da GUI (chaves em inglês, estáveis). `record devices` é sempre JSON.
 
 fn ipc_error(e: ipc::IpcError) -> Error {
@@ -653,11 +653,11 @@ fn start_request(app: &App, a: &RecordArgs, fill_last: bool) -> core_lib::Result
     }
 }
 
-/// "Chamada de <data>" quando não há título (mesmo texto da tela).
+/// "Chamada de <data> às <hora>" quando não há título (o título fica vazio no banco; mesmo texto da tela).
 fn display_title(lang: Lang, rec: &Value) -> String {
     match rec["title"].as_str().filter(|t| !t.is_empty()) {
         Some(t) => t.to_string(),
-        None => format!("{} {}", i18n::msg(lang, "call_untitled"), rec["started_at"].as_str().unwrap_or("").replace('T', " ")),
+        None => i18n::untitled_call(lang, rec["started_at"].as_str().unwrap_or("")),
     }
 }
 
@@ -719,9 +719,9 @@ fn exec_status(_app: &App, lang: Lang, json_out: bool, sock: &std::path::Path) -
     Ok(status_output(json_out, status, |s| {
         if s["state"] == "recording" {
             let rec = &s["recording"];
-            format!("recording {} {}\n", fmt_time(rec["elapsed_s"].as_f64().unwrap_or(0.0)), display_title(lang, rec))
+            format!("{} {} {}\n", i18n::msg(lang, "rec_recording"), fmt_time(rec["elapsed_s"].as_f64().unwrap_or(0.0)), display_title(lang, rec))
         } else {
-            "idle\n".to_string()
+            format!("{}\n", i18n::msg(lang, "status_idle"))
         }
     }))
 }
@@ -1368,7 +1368,7 @@ fn parse_time(s: &str) -> core_lib::Result<f64> {
 fn render_text(app: &App, d: &core_lib::model::CallDetail, lang: Lang) -> String {
     let me = app.setting("me_name").ok().flatten();
     let title = if d.summary.title.is_empty() {
-        format!("{} {}", i18n::msg(lang, "call_untitled"), d.summary.started_at.replace('T', " "))
+        i18n::untitled_call(lang, &d.summary.started_at)
     } else {
         d.summary.title.clone()
     };
@@ -1524,6 +1524,8 @@ mod tests {
 
         // status: texto e JSON (chaves estáveis)
         assert_eq!(text(exec_status(&app, Lang::EnUs, false, &gui.sock)), "recording 01:05 Reunião\n");
+        assert_eq!(text(exec_status(&app, Lang::PtBr, false, &gui.sock)), "gravando 01:05 Reunião\n");
+        assert_eq!(text(exec_status(&app, Lang::Es419, false, &gui.sock)), "grabando 01:05 Reunião\n");
         let Output::Json(v, _) = exec_status(&app, Lang::EnUs, true, &gui.sock).unwrap() else { panic!() };
         assert_eq!((v["state"].as_str(), v["app_running"].as_bool(), v["recording"]["title"].as_str()), (Some("recording"), Some(true), Some("Reunião")));
         assert!(v["finalizing"].is_array() && v["shortcut_supported"] == true && v.get("ok").is_none());
@@ -1532,12 +1534,19 @@ mod tests {
         assert_eq!(text(rec(RecordCmd::Stop, Lang::EnUs, false)), "stopped: call_2026-10-02_10-00-00\n");
         assert!(rec(RecordCmd::Stop, Lang::EnUs, false).is_err_and(|e| e.code() == "not_recording"));
 
-        // toggle sem argumentos herda o último alvo/dispositivos; sem título → "Chamada de <data>"
+        // toggle sem argumentos herda o último alvo/dispositivos; sem título → "Chamada de <data> às <hora>" (formato da tela, no idioma pedido)
         core_rec::save_last_used(&app, &core_rec::LastUsed { library_id: Some(2), client_id: Some(1), mic: StreamChoice::Named("m".into()), sys: StreamChoice::Off }).unwrap();
         while gui.seen.try_recv().is_ok() {}
-        assert_eq!(text(rec(rec_cmd(&["toggle"]), Lang::PtBr, false)), "gravando: Chamada de 2026-10-02 10:00:00\n");
+        assert_eq!(text(rec(rec_cmd(&["toggle"]), Lang::PtBr, false)), "gravando: Chamada de 02/10 às 10:00\n");
         let Request::RecordToggle(req) = gui.seen.recv().unwrap() else { panic!() };
         assert_eq!((req.meta.library_id, req.meta.client_id, req.mic, req.sys), (Some(2), Some(1), StreamChoice::Named("m".into()), StreamChoice::Off));
+        // o título continua vazio no pedido (montado só na exibição); `status` usa o mesmo texto
+        assert_eq!(req.meta.title, None);
+        assert_eq!(text(exec_status(&app, Lang::EnUs, false, &gui.sock)), "recording 01:05 Call on 10/02 at 10:00\n");
+        assert_eq!(text(exec_status(&app, Lang::Es419, false, &gui.sock)), "grabando 01:05 Llamada del 2/10 a las 10:00\n");
+        assert_eq!(text(exec_status(&app, Lang::PtBr, false, &gui.sock)), "gravando 01:05 Chamada de 02/10 às 10:00\n");
+        let Output::Json(v, _) = exec_status(&app, Lang::Es419, true, &gui.sock).unwrap() else { panic!() };
+        assert_eq!((v["recording"]["title"].as_str(), v["recording"]["started_at"].as_str()), (Some(""), Some("2026-10-02T10:00:00")));
         let Output::Json(v, _) = rec(rec_cmd(&["toggle"]), Lang::EnUs, true).unwrap() else { panic!() };
         assert_eq!((v["state"].as_str(), v["finalizing"][0].as_str()), (Some("idle"), Some("call_2026-10-02_10-00-00")));
 
@@ -1674,6 +1683,8 @@ mod tests {
         let sock = tmp.path().join("nope.sock");
         // status não precisa da app: idle, exit 0
         assert_eq!(text(exec_status(&app, Lang::EnUs, false, &sock)), "idle\n");
+        assert_eq!(text(exec_status(&app, Lang::PtBr, false, &sock)), "parado\n");
+        assert_eq!(text(exec_status(&app, Lang::Es419, false, &sock)), "detenido\n");
         let Output::Json(v, _) = exec_status(&app, Lang::EnUs, true, &sock).unwrap() else { panic!() };
         assert_eq!((v["state"].as_str(), v["app_running"].as_bool()), (Some("idle"), Some(false)));
         assert!(v["recording"].is_null() && v["finalizing"].as_array().unwrap().is_empty());

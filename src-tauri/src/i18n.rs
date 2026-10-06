@@ -143,6 +143,34 @@ pub fn error_prefix(lang: Lang, code: &str) -> &'static str {
     }
 }
 
+/// Texto de `call.untitled` da interface (mesmo arquivo: uma só fonte para o formato do título).
+fn untitled_template(lang: Lang) -> String {
+    let json = match lang {
+        Lang::PtBr => include_str!("../../ui/src/locales/pt-BR.json"),
+        Lang::EnUs => include_str!("../../ui/src/locales/en-US.json"),
+        Lang::Es419 => include_str!("../../ui/src/locales/es-419.json"),
+    };
+    let dict: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
+    dict["call.untitled"].as_str().unwrap_or("{date} {time}").to_string()
+}
+
+/// Título de exibição de chamada sem título (a coluna fica vazia; o texto é montado ao exibir, na UI
+/// e aqui): `call.untitled` com a data curta e a hora de `started_at` (`AAAA-MM-DDTHH:MM:SS`).
+/// Data curta como o `Intl` da UI: pt-BR `DD/MM`, en-US `MM/DD`, es-419 `D/M` (sem zero à esquerda).
+/// `started_at` fora do formato → o texto cru, sem inventar data.
+pub fn untitled_call(lang: Lang, started_at: &str) -> String {
+    let num = |r: std::ops::Range<usize>| started_at.get(r).filter(|s| s.bytes().all(|b| b.is_ascii_digit())).and_then(|s| s.parse::<u32>().ok());
+    let (Some(month), Some(day), Some(clock)) = (num(5..7), num(8..10), started_at.get(11..16).filter(|c| c.as_bytes()[2] == b':')) else {
+        return started_at.replace('T', " ");
+    };
+    let date = match lang {
+        Lang::PtBr => format!("{day:02}/{month:02}"),
+        Lang::EnUs => format!("{month:02}/{day:02}"),
+        Lang::Es419 => format!("{day}/{month}"),
+    };
+    untitled_template(lang).replace("{date}", &date).replace("{time}", clock)
+}
+
 /// Mensagem traduzida; ausente no idioma → inglês.
 pub fn msg(lang: Lang, key: &str) -> &'static str {
     match lookup(lang, key) {
@@ -160,9 +188,6 @@ fn lookup(lang: Lang, key: &str) -> &'static str {
         ("dry_run", PtBr) => "simulação: nada foi gravado",
         ("dry_run", EnUs) => "dry run: nothing was written",
         ("dry_run", Es419) => "simulación: no se guardó nada",
-        ("call_untitled", PtBr) => "Chamada de",
-        ("call_untitled", EnUs) => "Call on",
-        ("call_untitled", Es419) => "Llamada del",
         ("unclassified", PtBr) => "Não classificadas",
         ("unclassified", EnUs) => "Unclassified",
         ("unclassified", Es419) => "Sin clasificar",
@@ -184,6 +209,9 @@ fn lookup(lang: Lang, key: &str) -> &'static str {
         ("rec_recording", PtBr) => "gravando",
         ("rec_recording", EnUs) => "recording",
         ("rec_recording", Es419) => "grabando",
+        ("status_idle", PtBr) => "parado",
+        ("status_idle", EnUs) => "idle",
+        ("status_idle", Es419) => "detenido",
         ("rec_stopped", PtBr) => "parado",
         ("rec_stopped", EnUs) => "stopped",
         ("rec_stopped", Es419) => "detenido",
@@ -278,6 +306,32 @@ mod tests {
                 let text = error_prefix(lang, code);
                 assert!(!matches!(text, "erro" | "error"), "{code} sem tradução em {}", lang.tag());
             }
+        }
+    }
+
+    /// Mesmo texto e data curta que a UI (`call.untitled` + `fmtDateShort` + `fmtClock`) em cada idioma.
+    #[test]
+    fn untitled_call_matches_ui_format() {
+        assert_eq!(untitled_call(Lang::EnUs, "2026-03-03T09:00:00"), "Call on 03/03 at 09:00");
+        assert_eq!(untitled_call(Lang::EnUs, "2026-10-05T21:33:37"), "Call on 10/05 at 21:33");
+        assert_eq!(untitled_call(Lang::PtBr, "2026-10-05T21:33:37"), "Chamada de 05/10 às 21:33");
+        assert_eq!(untitled_call(Lang::Es419, "2026-10-05T21:33:37"), "Llamada del 5/10 a las 21:33");
+        assert_eq!(untitled_call(Lang::Es419, "2026-03-13T09:00:00"), "Llamada del 13/3 a las 09:00");
+        // formato inesperado: texto cru
+        assert_eq!(untitled_call(Lang::PtBr, "ontem"), "ontem");
+        assert_eq!(untitled_call(Lang::PtBr, ""), "");
+        assert_eq!(untitled_call(Lang::PtBr, "2026-xx-05T21:33:37"), "2026-xx-05 21:33:37");
+        // o modelo da UI tem os dois campos em todos os idiomas
+        for lang in LANGS {
+            let t = untitled_template(lang);
+            assert!(t.contains("{date}") && t.contains("{time}"), "call.untitled sem {{date}}/{{time}} em {}", lang.tag());
+        }
+    }
+
+    #[test]
+    fn status_idle_exists_in_all_languages() {
+        for lang in LANGS {
+            assert!(!lookup(lang, "status_idle").is_empty(), "status_idle sem tradução em {}", lang.tag());
         }
     }
 

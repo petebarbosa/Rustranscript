@@ -24,7 +24,8 @@ export interface PlayerCtl {
   toggle(): void
   /** Pula para `s`; `play` começa a tocar dali (clique no tempo de um trecho). */
   seek(s: number, play?: boolean): void
-  dispose(): void
+  /** Fecha o player no Rust; a promessa resolve quando ele soltou os arquivos. */
+  dispose(): Promise<void>
 }
 
 interface Opts {
@@ -228,7 +229,7 @@ export function createPlayer(o: Opts): PlayerCtl {
       void offEv.then(f => f())
       ro.disconnect()
       el.remove()
-      void api.playerClose(o.libraryId, o.callId).catch(() => {})
+      return api.playerClose(o.libraryId, o.callId).catch(() => {})
     },
   }
 }

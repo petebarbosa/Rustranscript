@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use core_lib::import::{self, ImportOptions};
 use core_lib::model::*;
 use core_lib::rules::{ImportScope, RuleInput, RuleSource};
-use core_lib::{App, ClientFilter, Library, Origin, paths, search, transfer};
+use core_lib::{App, ClientFilter, Library, Origin, paths, search, storage, transfer};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tauri::{Emitter, Manager, State};
@@ -237,6 +237,29 @@ fn reclaimable(state: State<AppState>) -> R<Value> {
         let total: u64 = files.iter().map(|f| f.size).sum();
         Ok(json!({"total_bytes": total, "files": files}))
     })
+}
+
+/// Chamadas que ainda têm áudio no disco, com o tamanho de cada uma (tela de armazenamento).
+#[tauri::command(async)]
+fn audio_list(state: State<AppState>) -> R<Value> {
+    with_app(&state, |app| {
+        let entries = storage::list_audio(app)?;
+        let total: u64 = entries.iter().map(|e| e.bytes).sum();
+        Ok(json!({"total_bytes": total, "calls": entries}))
+    })
+}
+
+/// Apaga o áudio de uma chamada já transcrita (irreversível). `dry_run`: só diz o que seria apagado e o
+/// tamanho (a confirmação da tela). Recusa se a chamada está sendo gravada ou convertida.
+#[tauri::command(async)]
+fn audio_delete(handle: tauri::AppHandle, state: State<AppState>, library_id: i64, call_id: i64, dry_run: bool) -> R<storage::AudioDeletion> {
+    let st = recording::status(&handle);
+    let busy: Vec<String> = st.recording.map(|r| r.key).into_iter().chain(st.finalizing).collect();
+    let r = with_app(&state, |app| storage::delete_audio(app, library_id, call_id, &busy, dry_run))?;
+    if !dry_run {
+        changed(&handle, json!({"event": "changed", "library_id": library_id, "call_id": call_id}));
+    }
+    Ok(r)
 }
 
 /// Simulação (nada é gravado): o que a importação faria com essas pastas/arquivos.
@@ -542,6 +565,8 @@ pub fn run(data_dir: Option<PathBuf>) {
             assign,
             set_setting,
             reclaimable,
+            audio_list,
+            audio_delete,
             import_preview,
             import_start,
             glossary_list,

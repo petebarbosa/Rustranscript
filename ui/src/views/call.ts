@@ -3,9 +3,10 @@ import { t } from '../i18n'
 import { hooks, libName, meName, store, type View } from '../store'
 import { assignDialog, btnCls, confirmDialog, describeError, describeGlossaryError, field, form, inputCls, renameDialog } from '../dialogs'
 import { cancelJob, enqueueCall, isReady, jobError, jobForCall, jobProgress, retryJob, stageText, subscribe as subscribeTx, tx } from '../tx'
-import { barHtml, callTitle, diffWords, esc, fmtClock, fmtDate, fmtDuration, fmtNumber, fmtTime, fold, speakerDefault, speakerName, toast, toastAction } from '../util'
+import { barHtml, callTitle, diffWords, esc, fmtBytes, fmtClock, fmtDate, fmtDuration, fmtNumber, fmtTime, fold, speakerDefault, speakerName, toast, toastAction } from '../util'
 import { caseBadge, readRule, ruleFields, ruleText, syncKind } from '../rules'
 import { createPlayer, type PlayerCtl } from '../player'
+import { audioError, confirmAudioDelete } from '../audio'
 
 // (rótulo, balão) para quem não é o microfone
 const PALETTE = [
@@ -185,10 +186,11 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
           ${pending ? '' : `<span class="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1.5">
             <button type="button" id="speakers-btn" class="${pill}">${esc(t('call.speakers'))}</button>
             ${bleed.length ? `<button type="button" id="bleed-btn" class="${pill}">${esc(t('call.bleed_title', { n: bleed.length }))}</button>` : ''}
-            <button type="button" id="redo-btn" class="${pill}">${esc(t('call.redo'))}</button></span>`}
+            <button type="button" id="redo-btn" ${d.audio.deleted_at ? `disabled title="${esc(t('audio.redo_off'))}"` : ''} class="${pill}${d.audio.deleted_at ? ' cursor-not-allowed opacity-40' : ''}">${esc(t('call.redo'))}</button>
+            ${d.has_audio ? `<button type="button" id="audio-delete-btn" class="${pill} hover:!border-rose-400/50 hover:!text-rose-200">${esc(t('audio.delete'))}</button>` : ''}</span>`}
         </div>
         <div id="job-strip" class="mt-2 empty:hidden">${jobStripHtml()}</div>
-        ${audioNote && !pending ? `<p id="player-note" class="mt-2 text-xs text-zinc-500">${esc(audioNote)}</p>` : ''}
+        ${pending ? '' : audioNoteHtml()}
         <div class="mt-3 flex flex-wrap items-center gap-2">
           <div class="relative min-w-[14rem] flex-1" ${pending ? 'hidden' : ''}>
             <input id="q" type="search" autocomplete="off" placeholder="${esc(t('call.search'))}"
@@ -624,6 +626,21 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     if (r) { toast(t('queue.enqueued')); paintJob() }
   }
 
+  /** Apagar o áudio (irreversível): a confirmação mostra o tamanho que será liberado; a transcrição fica. */
+  async function deleteAudioDialog() {
+    let plan
+    try { plan = await api.audioDelete(libraryId, callId, true) } catch (e) { toast(audioError(e), 'err'); return }
+    const r = await confirmAudioDelete(t('audio.delete_title'), plan.bytes, async () => {
+      // o player tem os FLACs abertos: fecha (e espera) antes de apagar; se a exclusão falhar, ele volta
+      if (player) { const p = player; player = null; await p.dispose() }
+      try { return await api.audioDelete(libraryId, callId, false) }
+      catch (e) { void startPlayer(); throw e }
+    })
+    if (!r) return
+    await reload()
+    toast(t('audio.deleted_toast', { size: fmtBytes(r.bytes) }))
+  }
+
   /** Trechos do microfone descartados como eco. Restaurar = remontar sem o filtro (o bruto é preservado). */
   async function bleedDialog() {
     const reason = (r: BleedRemoval) => t(`call.bleed_reason.${r.reason}`)
@@ -831,7 +848,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
 
   // ------------------------------------------------------------ player de áudio (issue #22)
   const noAudioReason = (): 'deleted' | 'none' | null => (d.audio.deleted_at ? 'deleted' : !d.audio.mic_path && !d.audio.sys_path ? 'none' : null)
-  const noteFor = (why: string, error = '') => (why === 'deleted' ? t('call.audio_deleted') : why === 'none' ? t('call.audio_none') : why === 'missing' ? t('player.missing') : t('player.unreadable', { error }))
+  const noteFor = (why: string, error = '') => (why === 'none' ? t('call.audio_none') : why === 'missing' ? t('player.missing') : t('player.unreadable', { error }))
   /** Os trechos em ordem de início (busca binária por posição); refeito a cada `draw()`, que recria o DOM. */
   let starts: { t: number; id: number }[] = []
   let playingId: number | null = null
@@ -863,9 +880,11 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     if (r.top < top || r.bottom > bottom) b.scrollIntoView({ block: 'center', behavior: 'smooth' })
   }
 
-  /** Abre o player no Rust e mostra a barra; sem áudio mostra só a linha que explica. Uma vez por abertura da tela. */
+  /** Abre o player no Rust e mostra a barra; sem áudio mostra só a linha que explica. */
   async function startPlayer() {
+    if (player) return
     const why = noAudioReason()
+    if (why === 'deleted') return // a linha de "áudio apagado" sai de `d` (audioNoteHtml)
     if (why) { audioNote = noteFor(why); paintNote(); return }
     try {
       const info = await api.playerOpen(libraryId, callId)
@@ -878,20 +897,24 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     }
   }
 
-  /** A linha "sem áudio" sem refazer a página (as chamadas pendentes já dizem isso no próprio estado). */
-  function paintNote() {
-    el.querySelector('#player-note')?.remove()
-    if (!audioNote || noTranscript()) return
-    el.querySelector('#job-strip')?.insertAdjacentHTML('afterend', `<p id="player-note" class="mt-2 text-xs text-zinc-500">${esc(audioNote)}</p>`)
+  /** A única linha sob o cabeçalho sobre o áudio: apagado (com a data), sem trilhas, arquivos ausentes ou ilegível. */
+  function audioNoteHtml() {
+    const text = d.audio.deleted_at ? t('audio.gone_note', { date: fmtDate(d.audio.deleted_at) }) : audioNote
+    return text ? `<p id="audio-note" class="mt-2 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-zinc-400">${esc(text)}</p>` : ''
   }
 
-  /** O áudio sumiu (apagado por outra tela): fecha o player, que ainda tem os arquivos abertos, e explica. */
+  /** A linha sem refazer a página (as chamadas pendentes já dizem isso no próprio estado). */
+  function paintNote() {
+    el.querySelector('#audio-note')?.remove()
+    if (noTranscript()) return
+    el.querySelector('#job-strip')?.insertAdjacentHTML('afterend', audioNoteHtml())
+  }
+
+  /** O áudio sumiu (apagado por outra tela): fecha o player, que ainda tem os arquivos abertos. O desenho explica. */
   function syncAudio() {
-    const why = noAudioReason()
-    if (!why || !player) return
-    player.dispose()
+    if (!noAudioReason() || !player) return
+    void player.dispose()
     player = null
-    audioNote = noteFor(why)
   }
 
   function bind() {
@@ -903,6 +926,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     el.querySelector('#select-btn')?.addEventListener('click', () => void setSelecting(!selecting))
     el.querySelector('#speakers-btn')?.addEventListener('click', speakersDialog)
     el.querySelector('#redo-btn')?.addEventListener('click', redoDialog)
+    el.querySelector('#audio-delete-btn')?.addEventListener('click', deleteAudioDialog)
     el.querySelector('#bleed-btn')?.addEventListener('click', bleedDialog)
     el.querySelector<HTMLSelectElement>('#version')?.addEventListener('change', async e => {
       await api.setActiveTranscript(libraryId, callId, Number((e.target as HTMLSelectElement).value))

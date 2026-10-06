@@ -165,8 +165,9 @@ fn insert_job(app: &App, library_id: i64, call_id: i64, call_key: &str, kind: Jo
     Ok(id)
 }
 
-/// Cria uma tarefa. Validações: biblioteca disponível e chamada existem (`not_found`); `no_audio` quando a
-/// chamada não tem áudio (`audio_deleted_at`, sem arquivos; `resegment` não precisa de áudio); `rediarize`/
+/// Cria uma tarefa. Validações: biblioteca disponível e chamada existem (`not_found`); `audio_deleted` quando o
+/// áudio foi apagado pelo usuário (`audio_deleted_at`) e `no_audio` quando a chamada nunca teve ou perdeu os
+/// arquivos (`resegment` não precisa de áudio); `rediarize`/
 /// `resegment` exigem versão ativa com bruto (`no_raw_data`); já há tarefa aberta para a chamada → `conflict`.
 /// Chamada sem versão que estava `failed` volta a `pending`.
 pub fn enqueue(app: &App, library_id: i64, call_id: i64, kind: JobKind, options: &JobOptions) -> Result<JobInfo> {
@@ -189,16 +190,24 @@ pub fn enqueue(app: &App, library_id: i64, call_id: i64, kind: JobKind, options:
         return Err(Error::invalid("expected speakers must be between 1 and 20"));
     }
     let has_audio = deleted.is_none() && [mic, sys].into_iter().flatten().any(|p| lib.audio_abs(&p).is_file());
+    // sem áudio: o motivo certo é "o usuário apagou" (não volta) ou "não há arquivo" (nunca teve / sumiu)
+    let no_audio = || {
+        if deleted.is_some() {
+            Error::transcription("audio_deleted", format!("call {key}"))
+        } else {
+            Error::transcription("no_audio", format!("call {key} has no audio"))
+        }
+    };
     let mut base = None;
     match kind {
         JobKind::Full => {
             if !has_audio {
-                return Err(Error::transcription("no_audio", format!("call {key} has no audio")));
+                return Err(no_audio());
             }
         }
         JobKind::Rediarize | JobKind::Resegment => {
             if kind == JobKind::Rediarize && !has_audio {
-                return Err(Error::transcription("no_audio", format!("call {key} has no audio")));
+                return Err(no_audio());
             }
             base = lib
                 .conn
@@ -233,7 +242,7 @@ pub fn enqueue_pending(app: &App) -> Result<Vec<JobInfo>> {
         for call_id in pending {
             match enqueue(app, row.id, call_id, JobKind::Full, &JobOptions::default()) {
                 Ok(j) => out.push(j),
-                Err(Error::Conflict(_)) | Err(Error::NotFound(_)) | Err(Error::Transcription("no_audio", _)) => {}
+                Err(Error::Conflict(_)) | Err(Error::NotFound(_)) | Err(Error::Transcription("no_audio" | "audio_deleted", _)) => {}
                 Err(e) => return Err(e),
             }
         }
@@ -364,6 +373,13 @@ pub fn mark_cancelled(app: &App, job_id: i64) -> Result<()> {
 /// (o bruto foi apagado; copia opções e `base_job_id`). Devolve a tarefa resultante.
 pub fn retry(app: &App, job_id: i64) -> Result<JobInfo> {
     let job = get(app, job_id)?;
+    // o áudio pode ter sido apagado depois da falha/cancelamento: só `resegment` dispensa áudio
+    if job.kind != JobKind::Resegment
+        && let Some(lib) = open_available(app, job.library_id)?
+        && lib.conn.query_row("SELECT audio_deleted_at IS NOT NULL FROM calls WHERE id = ?1", [job.call_id], |r| r.get::<_, bool>(0)).optional()?.unwrap_or(false)
+    {
+        return Err(Error::transcription("audio_deleted", format!("call {}", job.call_key)));
+    }
     match job.state {
         JobState::Failed => {
             let open: bool = app.db.query_row(

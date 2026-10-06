@@ -118,6 +118,19 @@ export interface Reclaimable {
   total_bytes: number
   files: { library_id: number; call_key: string; kind: string; path: string; size: number }[]
 }
+/** Apagar o áudio de uma chamada (#24). Em `dry_run` descreve o que seria apagado; nada muda. */
+export interface AudioDeletion {
+  library_id: number; call_id: number; call_key: string; dry_run: boolean
+  already_deleted: boolean
+  files: { name: string; bytes: number; kind: 'audio' | 'cache' }[]
+  bytes: number; deleted_at: string | null
+}
+/** Chamada com áudio no disco. `blocked`: por que não dá para apagar agora (null = pode). */
+export interface AudioEntry {
+  library_id: number; call_id: number; call_key: string; title: string; client_name: string | null
+  started_at: string; duration_s: number; bytes: number; blocked: 'not_transcribed' | 'job_open' | null
+}
+export interface AudioList { total_bytes: number; calls: AudioEntry[] }
 export interface Bootstrap {
   data_dir: string; system_language: string; inbox_id: number
   settings: Record<string, string>; libraries: LibraryInfo[]
@@ -310,6 +323,9 @@ export const api = {
     call<{ library_id: number; call_id: number }>('assign', { libraryId, callId, toLibraryId, clientId }),
   setSetting: (key: string, value: string | null) => call<void>('set_setting', { key, value }),
   reclaimable: () => call<Reclaimable>('reclaimable'),
+  audioList: () => call<AudioList>('audio_list'),
+  audioDelete: (libraryId: number, callId: number, dryRun: boolean) =>
+    call<AudioDeletion>('audio_delete', { libraryId, callId, dryRun }),
   importPreview: (paths: string[], libraryId: number | null) =>
     call<ImportReport>('import_preview', { paths, libraryId }),
   importStart: (paths: string[], libraryId: number | null, clientId: number | null, convertAudio: boolean) =>

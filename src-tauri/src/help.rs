@@ -113,7 +113,7 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("tary transcribe:no_bleed_filter", "Does not remove the other side's echo picked up by the microphone", "No elimina el eco del otro lado captado por el micrófono"),
     ("tary transcribe:dry_run", "Only shows what would be queued", "Solo muestra lo que se encolaría"),
     ("tary queue", "Transcription queue (default: `list`)", "Cola de transcripción (predeterminado: `list`)"),
-    ("tary queue list", "Running and queued jobs and the most recent finished ones", "Tareas en curso, en cola y las últimas terminadas"),
+    ("tary queue list", "Running and queued jobs and the most recent finished ones; on queued jobs, `blocked_by` says why it has not started", "Tareas en curso, en cola y las últimas terminadas; en las de la cola, `blocked_by` dice por qué no empieza"),
     ("tary queue pause", "Pauses the queue (the running job stops and goes back to the queue)", "Pausa la cola (la tarea en curso se detiene y vuelve a la cola)"),
     ("tary queue resume", "Resumes the queue", "Reanuda la cola"),
     ("tary queue cancel", "Cancels a queued job (a running one only from the app window)", "Cancela una tarea en cola (la que está en curso solo desde la ventana de la app)"),

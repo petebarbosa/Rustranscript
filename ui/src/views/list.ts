@@ -3,6 +3,7 @@ import { t } from '../i18n'
 import { libName, store, type View } from '../store'
 import { jobForCall, subscribe as subscribeTx, tx } from '../tx'
 import { callTitle, esc, fmtClock, fmtDate, fmtDuration, fmtNumber, fold } from '../util'
+import { queuedWhy } from './txwhy'
 
 export type Scope =
   | { kind: 'all' }
@@ -63,7 +64,7 @@ function card(c: CallSummary, showPlace: boolean) {
       ${c.edited_blocks ? chip(t('list.edited', { n: c.edited_blocks }), 'text-amber-300 bg-amber-400/10') : ''}
       ${c.versions > 1 ? chip(t('list.versions', { n: c.versions })) : ''}
     </div>
-    <p class="mt-3 line-clamp-2 text-sm leading-relaxed text-zinc-500 ${pending ? 'italic' : ''}">${esc(pending ? t(`transcription.${tr}_hint`, { error: c.transcription_error ?? '' }) : c.preview)}</p></a>`
+    <p class="mt-3 line-clamp-2 text-sm leading-relaxed text-zinc-500 ${pending ? 'italic' : ''}">${esc(pending ? (tr === 'queued' && job ? queuedWhy(job).text : t(`transcription.${tr}_hint`, { error: c.transcription_error ?? '' })) : c.preview)}</p></a>`
 }
 
 export async function renderList(el: HTMLElement, scope: Scope): Promise<View> {
@@ -111,7 +112,7 @@ export async function renderList(el: HTMLElement, scope: Scope): Promise<View> {
   await draw()
   // a fila mudou de estado (entrou, começou, falhou, terminou): refaz os selos
   let sig = ''
-  const jobsSig = () => tx.queue.jobs.map(j => `${j.id}:${j.state}`).join(',')
+  const jobsSig = () => tx.queue.jobs.map(j => `${j.id}:${j.state}:${j.blocked_by ?? ""}:${j.ahead ?? ""}`).join(',')
   sig = jobsSig()
   const offQueue = subscribeTx('queue', () => { const n = jobsSig(); if (n !== sig) { sig = n; void draw() } })
   const onKey = (e: KeyboardEvent) => {

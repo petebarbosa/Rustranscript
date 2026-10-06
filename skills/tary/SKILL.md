@@ -48,8 +48,8 @@ A rule is `wrong -> right` (replacement) or a bare term (steers the model). Scop
 
 ## Queue and setup
 
-- `tary queue --json` lists jobs; `tary queue pause` / `resume`. `tary transcribe <key> --dry-run` shows what would be queued; run it for real to (re)transcribe.
-- `tary setup status --json`; `tary setup install` downloads the engine and models (about 1.7 GB, once). Transcription stays queued until `runtime.state` is `ready`.
+- `tary queue --json` lists jobs; `tary queue pause` / `resume`. `blocked_by` (on the queue and on each queued job) says why nothing runs: `paused_user`, `paused_recording`, `runtime_installing`, `runtime_missing`, `runtime_outdated`, `models_missing`, or `behind` (`ahead` = jobs in front); `null` = it runs next. `tary transcribe <key> --dry-run` shows what would be queued; run it for real to (re)transcribe.
+- `tary setup status --json`; `tary setup install` downloads the engine and models (about 1.7 GB, once). Transcription stays queued until `runtime.state` is `ready`; `runtime_outdated` means run `setup install` again (downloaded models are kept).
 
 ## Audio (free disk space)
 

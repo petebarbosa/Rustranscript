@@ -10,7 +10,7 @@ use core_lib::transcription::engine::{Engine, FakeEngine, Flow, Terminal};
 use core_lib::transcription::models;
 use core_lib::transcription::params::JobOptions;
 use core_lib::transcription::protocol::{FromWorker, ToWorker};
-use core_lib::transcription::queue::{self, JobKind, JobState};
+use core_lib::transcription::queue::{self, BlockedBy, Gate, JobKind, JobState, PauseReason};
 use core_lib::transcription::runner::{self, CancelReason, RunEnd, Stage};
 use core_lib::transcription::staging::{self, Track};
 use core_lib::{App, Error, Library, Result};
@@ -535,8 +535,64 @@ fn cancelling_a_queued_job_and_the_open_job_rule() {
     assert_eq!(queue::prune_finished(&e.app, 0).unwrap(), 2);
     let next = e.enqueue(call, JobKind::Full, JobOptions::default());
     assert!(next.id > picked[0].id);
-    let st = queue::status(&e.app, None, 20).unwrap();
+    let st = queue::status(&e.app, &Gate::READY, 20).unwrap();
     assert_eq!(st.jobs.len(), 1);
+}
+
+/// `blocked_by` da fila e de cada tarefa enfileirada, com a precedência pausa → instalação → runtime → modelos → `behind`.
+#[test]
+fn queue_explains_why_jobs_do_not_run() {
+    let e = env();
+    let a = e.enqueue(e.call("call_a", Some(20), Some(20)), JobKind::Full, JobOptions::default());
+    let b = e.enqueue(e.call("call_b", Some(20), Some(20)), JobKind::Full, JobOptions::default());
+    let c = e.enqueue(e.call("call_c", Some(20), Some(20)), JobKind::Full, JobOptions::default());
+    let gate = |paused, runtime, models_ready, installing_runtime| Gate { paused, runtime, models_ready, installing_runtime };
+    let view = |g: &Gate| {
+        let st = queue::status(&e.app, g, 20).unwrap();
+        let jobs: Vec<_> = st.jobs.iter().filter(|j| j.state == JobState::Queued).map(|j| (j.id, j.blocked_by, j.ahead)).collect();
+        (st.blocked_by, st.paused, jobs)
+    };
+    // tudo pronto: a primeira vai rodar (sem motivo), as outras esperam a vez
+    assert_eq!(view(&Gate::READY), (None, None, vec![(a.id, None, Some(0)), (b.id, Some(BlockedBy::Behind), Some(1)), (c.id, Some(BlockedBy::Behind), Some(2))]));
+    // a primeira rodando: a seguinte tem 1 na frente, e a conta continua
+    queue::mark_running(&e.app, a.id).unwrap();
+    let (q, _, jobs) = view(&Gate::READY);
+    assert_eq!((q, jobs), (None, vec![(b.id, Some(BlockedBy::Behind), Some(1)), (c.id, Some(BlockedBy::Behind), Some(2))]));
+    let st = queue::status(&e.app, &Gate::READY, 20).unwrap();
+    assert_eq!((st.jobs[0].id, st.jobs[0].state, st.jobs[0].blocked_by, st.jobs[0].ahead), (a.id, JobState::Running, None, None));
+    queue::requeue(&e.app, a.id).unwrap();
+    // motivo da fila vale para todas (inclusive a da frente), no lugar de `behind`
+    for (g, want) in [
+        (gate(None, "missing", true, false), BlockedBy::RuntimeMissing),
+        (gate(None, "outdated", true, false), BlockedBy::RuntimeOutdated),
+        (gate(None, "outdated", true, true), BlockedBy::RuntimeInstalling),
+        (gate(None, "missing", true, true), BlockedBy::RuntimeInstalling),
+        (gate(None, "ready", false, false), BlockedBy::ModelsMissing),
+        (gate(Some(PauseReason::Recording), "ready", true, false), BlockedBy::PausedRecording),
+        (gate(Some(PauseReason::User), "ready", true, false), BlockedBy::PausedUser),
+    ] {
+        let (q, paused, jobs) = view(&g);
+        assert_eq!((q, paused), (Some(want), g.paused), "{g:?}");
+        assert!(jobs.iter().all(|j| j.1 == Some(want)), "{g:?}: {jobs:?}");
+        assert_eq!(jobs.iter().map(|j| j.2).collect::<Vec<_>>(), [Some(0), Some(1), Some(2)]);
+    }
+    // precedência: pausa do usuário > gravação > instalação > runtime > modelos
+    let q = |g: Gate| g.blocker();
+    assert_eq!(q(gate(Some(PauseReason::User), "outdated", false, true)), Some(BlockedBy::PausedUser));
+    assert_eq!(q(gate(Some(PauseReason::Recording), "missing", false, false)), Some(BlockedBy::PausedRecording));
+    assert_eq!(q(gate(None, "outdated", false, true)), Some(BlockedBy::RuntimeInstalling));
+    assert_eq!(q(gate(None, "missing", false, false)), Some(BlockedBy::RuntimeMissing));
+    assert_eq!(q(gate(None, "outdated", false, false)), Some(BlockedBy::RuntimeOutdated));
+    // worker falso dispensa runtime e modelos; a instalação dos modelos não vira `runtime_installing`
+    assert_eq!(q(gate(None, "fake", true, false)), None);
+    assert_eq!(q(gate(None, "ready", false, false)), Some(BlockedBy::ModelsMissing));
+    // fila vazia: o motivo da fila existe mesmo assim (a tela do ambiente usa)
+    queue::mark_cancelled(&e.app, a.id).unwrap();
+    queue::mark_cancelled(&e.app, b.id).unwrap();
+    queue::mark_cancelled(&e.app, c.id).unwrap();
+    assert_eq!(queue::status(&e.app, &gate(None, "outdated", true, false), 20).unwrap().blocked_by, Some(BlockedBy::RuntimeOutdated));
+    // tarefas terminadas nunca carregam motivo
+    assert!(queue::status(&e.app, &gate(None, "outdated", true, false), 20).unwrap().jobs.iter().all(|j| j.blocked_by.is_none() && j.ahead.is_none()));
 }
 
 #[test]

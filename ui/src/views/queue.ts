@@ -3,9 +3,10 @@ import { api, type CallSummary, type JobInfo } from '../api'
 import { t } from '../i18n'
 import { type View } from '../store'
 import { describeError } from '../dialogs'
-import { cancelJob, isReady, jobError, jobProgress, retryJob, stageText, subscribe, tx } from '../tx'
+import { cancelJob, isReady, jobProgress, retryJob, stageText, subscribe, tx, watchStatus } from '../tx'
 import { barHtml, callTitle, esc, fmtClock, fmtDate, toast } from '../util'
 import { mountSetup } from './txsetup'
+import { errorHtml, whyHtml } from './txwhy'
 
 const stateTone: Record<JobInfo['state'], string> = {
   queued: 'bg-amber-400/10 text-amber-300', running: 'bg-sky-400/10 text-sky-300', done: 'bg-emerald-400/10 text-emerald-300',
@@ -30,11 +31,9 @@ export async function renderQueue(el: HTMLElement): Promise<View> {
       const p = jobProgress(j)
       return `<p class="text-sm text-zinc-300">${esc(stageText(j))}</p><div class="mt-2">${barHtml(p.fraction, 'bg-sky-400')}</div>`
     }
-    if (j.state === 'queued') return `<p class="text-sm text-zinc-500">${esc(t('transcription.queued_body'))}</p>`
-    if (j.state === 'failed') {
-      const e = jobError(j)
-      return `<p class="text-sm text-rose-300">${esc(e.title)}</p>${e.detail ? `<p class="mt-1 break-words font-mono text-xs text-zinc-500">${esc(e.detail)}</p>` : ''}`
-    }
+    // o botão de instalar/atualizar fica no cartão do motor, na mesma tela: aqui só o motivo
+    if (j.state === 'queued') return whyHtml(j, { noAction: true })
+    if (j.state === 'failed') return errorHtml(j)
     return ''
   }
 
@@ -115,6 +114,8 @@ export async function renderQueue(el: HTMLElement): Promise<View> {
     }),
     subscribe('progress', paintProgress),
     subscribe('status', () => { if (!!el.querySelector('#queue-setup') === isReady()) draw() }),
+    // o estado do motor muda sem evento (instalação pela CLI, atualização do script): reler ao abrir e de tempos em tempos
+    watchStatus(),
   ]
   draw()
   return {

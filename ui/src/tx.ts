@@ -24,7 +24,7 @@ const idle = (): SetupState => ({ running: false, phase: null, step: null, index
 
 export const tx = {
   status: null as TranscriptionStatus | null,
-  queue: { paused: null, jobs: [] } as QueueStatus,
+  queue: { paused: null, blocked_by: null, jobs: [] } as QueueStatus,
   progress: new Map<number, JobProgress>(),
   setup: idle(),
 }
@@ -39,6 +39,8 @@ export function subscribe(kind: Kind, fn: () => void): () => void {
 let started = false
 
 function setQueue(q: QueueStatus) {
+  // o motivo da fila mudou (runtime atualizado por fora, instalação começou/acabou...): o estado do motor também pode ter mudado
+  const reasonChanged = q.blocked_by !== tx.queue.blocked_by
   tx.queue = q
   // progresso só vale para a tarefa rodando e na mesma etapa (a etapa nova chega no próximo `queue-progress`)
   for (const [id, p] of tx.progress) {
@@ -47,6 +49,7 @@ function setQueue(q: QueueStatus) {
   }
   if (tx.status) tx.status.queue = q
   notify('queue')
+  if (reasonChanged) void refreshStatus()
 }
 
 function setSetupEvent(e: SetupEvent) {
@@ -65,13 +68,37 @@ function setSetupEvent(e: SetupEvent) {
 export async function refreshStatus(): Promise<TranscriptionStatus | null> {
   try {
     const st = await api.transcriptionStatus()
+    // a releitura periódica (`watchStatus`) não redesenha as telas se nada mudou (preserva "detalhes" abertos e seleção)
+    const same = !!tx.status && JSON.stringify(tx.status) === JSON.stringify(st)
     tx.status = st
     tx.queue = st.queue
+    const was = tx.setup.running
     if (st.setup.running && !tx.setup.running) { Object.assign(tx.setup, idle(), { running: true, phase: st.setup.phase }) }
     if (!st.setup.running && tx.setup.running && tx.setup.phase !== null) tx.setup.running = false
+    if (same && was === tx.setup.running) return tx.status
     notify('status'); notify('queue'); notify('setup')
   } catch { /* sem backend de transcrição: a UI segue sem fila */ }
   return tx.status
+}
+
+/**
+ * Mantém `tx.status` (motor e modelos) fresco enquanto uma tela o mostra: relê agora e a cada `every` ms.
+ * O estado do motor muda sem evento (a CLI instala por fora; o `worker.py` é atualizado sozinho). Devolve quem desliga.
+ */
+export function watchStatus(every = 5000): () => void {
+  void refreshStatus()
+  const id = setInterval(() => { if (!document.hidden) void refreshStatus() }, every)
+  return () => clearInterval(id)
+}
+
+/** Instala/atualiza o motor e baixa os modelos que faltam (o mesmo fluxo do botão "Baixar e instalar"). */
+export async function startSetup(): Promise<void> {
+  Object.assign(tx.setup, { running: true, phase: 'runtime', step: null, index: null, of: null, error: null, ok: false })
+  notify('setup')
+  try { await api.transcriptionSetupStart() }
+  catch (e) {
+    if (toError(e).code !== 'conflict') { tx.setup.running = false; tx.setup.error = toError(e); notify('setup') }
+  }
 }
 
 /** Liga os eventos e busca o estado atual. Idempotente. */
@@ -121,12 +148,15 @@ export function stageText(j: JobInfo): string {
   return name
 }
 
-export function jobError(j: Pick<JobInfo, 'error_code' | 'error_detail'>): { title: string; detail: string } {
+export function jobError(j: Pick<JobInfo, 'error_code' | 'error_detail'>): { title: string; code: string; detail: string } {
   const code = j.error_code ?? 'job_failed'
   const k = `error.${code}`
   const title = t(k) === k ? t('error.job_failed') : t(k)
-  return { title, detail: j.error_detail ?? '' }
+  return { title, code, detail: j.error_detail ?? '' }
 }
+
+/** Motor que precisa de ação do usuário (instalar/atualizar); `fake` e `ready` não. */
+export const engineNeedsSetup = (st: TranscriptionStatus | null = tx.status) => !!st && !st.fake_worker && (st.runtime.state === 'missing' || st.runtime.state === 'outdated')
 
 // ---------------------------------------------------------------- ações (confirmação + aviso de erro)
 

@@ -22,7 +22,8 @@ pub enum Error {
     Recording(&'static str, String),
     /// Erros da transcrição (fase 4). Códigos estáveis em TRANSCRIPTION_CONTRACT.md §9: `not_implemented`,
     /// `runtime_missing`, `models_missing`, `setup_failed`, `download_failed`, `checksum_mismatch`,
-    /// `worker_crashed`, `worker_protocol`, `audio_decode`, `no_audio`, `oom`, `no_raw_data`, `job_failed`...
+    /// `worker_crashed`, `worker_protocol`, `audio_decode`, `no_audio`, `audio_deleted`, `not_transcribed`, `oom`,
+    /// `no_raw_data`, `job_failed`...
     #[error("transcription ({0}): {1}")]
     Transcription(&'static str, String),
     #[error(transparent)]

@@ -186,7 +186,7 @@ pub struct TranscribeArgs {
     #[arg(long, conflicts_with_all = ["call", "kind", "language", "expected_speakers", "no_bleed_filter"])]
     pending: bool,
     /// full: tudo de novo; rediarize: só separa as vozes de novo; resegment: só remonta o texto (sem rodar o modelo)
-    #[arg(long, value_parser = ["full", "rediarize", "resegment"])]
+    #[arg(long = "type", alias = "kind", value_name = "TYPE", value_parser = ["full", "rediarize", "resegment"])]
     kind: Option<String>,
     /// Idioma falado: auto, pt, en ou es (padrão: o da chamada ou da configuração)
     #[arg(long)]
@@ -386,7 +386,7 @@ enum GlossaryCmd {
         #[arg(long, requires = "library")]
         client: Option<String>,
         /// Só um tipo
-        #[arg(long, value_parser = ["term", "replace"])]
+        #[arg(long = "type", alias = "kind", value_name = "TYPE", value_parser = ["term", "replace"])]
         kind: Option<String>,
     },
     /// Cria uma regra: com <substituição> é "errado → certo"; sem, é um termo
@@ -445,7 +445,7 @@ enum GlossaryCmd {
         #[arg(long)]
         global: bool,
         /// Só aceita esse tipo de linha
-        #[arg(long, value_parser = ["term", "replace"])]
+        #[arg(long = "type", alias = "kind", value_name = "TYPE", value_parser = ["term", "replace"])]
         kind: Option<String>,
         #[arg(long)]
         dry_run: bool,
@@ -1742,7 +1742,7 @@ mod tests {
     #[test]
     fn transcription_commands_parse() {
         let p = |args: &[&str]| Cli::try_parse_from(std::iter::once("tary").chain(args.iter().copied())).map(|c| c.cmd);
-        let Ok(Cmd::Transcribe(a)) = p(&["transcribe", "call_2026-10-01_08-21-52", "--kind", "rediarize", "--language", "pt-BR", "--speakers", "2", "--no-bleed-filter"]) else {
+        let Ok(Cmd::Transcribe(a)) = p(&["transcribe", "call_2026-10-01_08-21-52", "--type", "rediarize", "--language", "pt-BR", "--speakers", "2", "--no-bleed-filter"]) else {
             panic!("transcribe")
         };
         assert_eq!((a.call.as_deref(), a.kind.as_deref(), a.expected_speakers, a.no_bleed_filter, a.pending), (Some("call_2026-10-01_08-21-52"), Some("rediarize"), Some(2), true, false));
@@ -1754,6 +1754,7 @@ mod tests {
         assert!(p(&["transcribe", "--pending", "call_x"]).is_err());
         assert!(p(&["transcribe", "--pending", "--kind", "full"]).is_err());
         assert!(p(&["transcribe", "call_x", "--kind", "tudo"]).is_err());
+        assert!(matches!(p(&["transcribe", "call_x", "--kind", "full"]), Ok(Cmd::Transcribe(a)) if a.kind.as_deref() == Some("full")), "--kind segue como apelido");
         assert!(job_options(&TranscribeArgs { language: Some("fr".into()), ..Default::default() }).is_err_and(|e| e.code() == "invalid"));
         assert!(job_options(&TranscribeArgs { expected_speakers: Some(0), ..Default::default() }).is_err_and(|e| e.code() == "invalid"));
         assert_eq!(job_options(&TranscribeArgs { language: Some("auto".into()), ..Default::default() }).unwrap().language.as_deref(), Some("auto"));
@@ -1790,7 +1791,7 @@ mod tests {
         assert!(run(&app, &["queue", "cancel", "999"]).is_err_and(|e| e.code() == "not_found"));
 
         // simulação: não cria tarefa, devolve o que seria enfileirado
-        let (v, notify) = run(&app, &["transcribe", call, "--dry-run", "--kind", "resegment", "--speakers", "2", "--language", "es"]).unwrap();
+        let (v, notify) = run(&app, &["transcribe", call, "--dry-run", "--type", "resegment", "--speakers", "2", "--language", "es"]).unwrap();
         assert!(notify.is_none());
         assert_eq!(v["dry_run"], true);
         assert_eq!(v["result"]["call_key"], call);
@@ -1961,7 +1962,7 @@ mod tests {
         assert!(run(&app, &["glossary", "add", "a", "a", "--global"]).is_err_and(|e| e.code() == "invalid"));
         assert!(run(&app, &["glossary", "add", "sem escopo"]).is_err_and(|e| e.code() == "invalid"));
 
-        let (v, _) = run(&app, &["glossary", "list", "--kind", "replace"]).unwrap();
+        let (v, _) = run(&app, &["glossary", "list", "--type", "replace"]).unwrap();
         assert_eq!(v.as_array().unwrap().len(), 1);
 
         // simulação: JSON do relatório, nada gravado, nenhum aviso

@@ -3,8 +3,9 @@ import { t } from '../i18n'
 import { hooks, libName, meName, store, type View } from '../store'
 import { assignDialog, btnCls, confirmDialog, describeError, describeGlossaryError, field, form, inputCls, renameDialog } from '../dialogs'
 import { cancelJob, enqueueCall, isReady, jobError, jobForCall, jobProgress, retryJob, stageText, subscribe as subscribeTx, tx } from '../tx'
-import { barHtml, callTitle, diffWords, esc, fmtClock, fmtDate, fmtDuration, fmtNumber, fmtTime, fold, speakerDefault, speakerName, toast, toastAction } from '../util'
+import { barHtml, callTitle, diffWords, esc, fmtBytes, fmtClock, fmtDate, fmtDuration, fmtNumber, fmtTime, fold, speakerDefault, speakerName, toast, toastAction } from '../util'
 import { caseBadge, readRule, ruleFields, ruleText, syncKind } from '../rules'
+import { audioError, confirmAudioDelete } from '../audio'
 
 // (rótulo, balão) para quem não é o microfone
 const PALETTE = [
@@ -180,9 +181,11 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
           ${pending ? '' : `<span class="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1.5">
             <button type="button" id="speakers-btn" class="${pill}">${esc(t('call.speakers'))}</button>
             ${bleed.length ? `<button type="button" id="bleed-btn" class="${pill}">${esc(t('call.bleed_title', { n: bleed.length }))}</button>` : ''}
-            <button type="button" id="redo-btn" class="${pill}">${esc(t('call.redo'))}</button></span>`}
+            <button type="button" id="redo-btn" ${d.audio.deleted_at ? `disabled title="${esc(t('audio.redo_off'))}"` : ''} class="${pill}${d.audio.deleted_at ? ' cursor-not-allowed opacity-40' : ''}">${esc(t('call.redo'))}</button>
+            ${d.has_audio ? `<button type="button" id="audio-delete-btn" class="${pill} hover:!border-rose-400/50 hover:!text-rose-200">${esc(t('audio.delete'))}</button>` : ''}</span>`}
         </div>
         <div id="job-strip" class="mt-2 empty:hidden">${jobStripHtml()}</div>
+        ${!pending && d.audio.deleted_at ? `<p id="audio-note" class="mt-2 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-zinc-400">${esc(t('audio.gone_note', { date: fmtDate(d.audio.deleted_at) }))}</p>` : ''}
         <div class="mt-3 flex flex-wrap items-center gap-2">
           <div class="relative min-w-[14rem] flex-1" ${pending ? 'hidden' : ''}>
             <input id="q" type="search" autocomplete="off" placeholder="${esc(t('call.search'))}"
@@ -613,6 +616,16 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     if (r) { toast(t('queue.enqueued')); paintJob() }
   }
 
+  /** Apagar o áudio (irreversível): a confirmação mostra o tamanho que será liberado; a transcrição fica. */
+  async function deleteAudioDialog() {
+    let plan
+    try { plan = await api.audioDelete(libraryId, callId, true) } catch (e) { toast(audioError(e), 'err'); return }
+    const r = await confirmAudioDelete(t('audio.delete_title'), plan.bytes, () => api.audioDelete(libraryId, callId, false))
+    if (!r) return
+    await reload()
+    toast(t('audio.deleted_toast', { size: fmtBytes(r.bytes) }))
+  }
+
   /** Trechos do microfone descartados como eco. Restaurar = remontar sem o filtro (o bruto é preservado). */
   async function bleedDialog() {
     const reason = (r: BleedRemoval) => t(`call.bleed_reason.${r.reason}`)
@@ -827,6 +840,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     el.querySelector('#select-btn')?.addEventListener('click', () => void setSelecting(!selecting))
     el.querySelector('#speakers-btn')?.addEventListener('click', speakersDialog)
     el.querySelector('#redo-btn')?.addEventListener('click', redoDialog)
+    el.querySelector('#audio-delete-btn')?.addEventListener('click', deleteAudioDialog)
     el.querySelector('#bleed-btn')?.addEventListener('click', bleedDialog)
     el.querySelector<HTMLSelectElement>('#version')?.addEventListener('change', async e => {
       await api.setActiveTranscript(libraryId, callId, Number((e.target as HTMLSelectElement).value))

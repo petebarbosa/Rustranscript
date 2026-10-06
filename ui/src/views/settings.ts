@@ -3,6 +3,7 @@ import { LANGS, lang, setLang, t, type Lang } from '../i18n'
 import { hooks, store, type View } from '../store'
 import { addLibraryDialog, btnCls, confirmDialog, describeError, inputCls, renameDialog } from '../dialogs'
 import { esc, fmtNumber, toast } from '../util'
+import { mountAudioStorage } from './storage'
 import { mountTranscriptionSettings } from './txsettings'
 
 // Trechos do compositor (RECORDING_CONTRACT §10.5, verificados em out/2026). A regra casa pelo título INICIAL da janela.
@@ -105,8 +106,10 @@ export async function renderSettings(el: HTMLElement): Promise<View> {
   }
 
   let offTx: (() => void) | null = null
+  let offAudio: (() => void) | null = null
   const draw = () => {
     offTx?.()
+    offAudio?.()
     const companies = store.libraries.filter(l => l.kind === 'company')
     el.innerHTML = `<div class="mx-auto max-w-3xl px-6 py-10">
       <h1 class="text-3xl font-semibold tracking-tight text-white">${esc(t('settings.title'))}</h1>
@@ -125,6 +128,8 @@ export async function renderSettings(el: HTMLElement): Promise<View> {
       ${recSection()}
 
       <section id="tx-settings" class="mt-8"></section>
+
+      <section id="audio-storage" class="mt-8 rounded-2xl border border-white/10 bg-ink-900/60 p-5"></section>
 
       <section class="mt-8">
         <div class="flex items-center justify-between">
@@ -169,6 +174,7 @@ rstt --help</pre>
     })
     bindRecord()
     offTx = mountTranscriptionSettings(el.querySelector<HTMLElement>('#tx-settings')!)
+    offAudio = mountAudioStorage(el.querySelector<HTMLElement>('#audio-storage')!)
     el.querySelector('#add-lib')!.addEventListener('click', async () => {
       if (await addLibraryDialog()) { await hooks.reloadNav(); draw() }
     })
@@ -226,5 +232,5 @@ rstt --help</pre>
   }
 
   draw()
-  return { refresh: draw, dispose: () => offTx?.() }
+  return { refresh: draw, dispose: () => { offTx?.(); offAudio?.() } }
 }

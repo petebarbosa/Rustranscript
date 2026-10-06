@@ -1,6 +1,6 @@
 # Maintainer: petebarbosa <https://github.com/petebarbosa>
 pkgname=rustranscript
-pkgver=0.2.1
+pkgver=0.2.2
 pkgrel=1
 pkgdesc='Record and transcribe your meetings locally, with speaker separation'
 arch=('x86_64')
@@ -11,7 +11,7 @@ makedepends=('cargo' 'nodejs' 'npm' 'git')
 optdepends=('xdg-utils: open links and folders from the app')
 options=('!lto' '!debug')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('4f65a5fc8e5355f67e5525a615d4473fc5c7cc76bcf00933112af052b4bf42c8')
+sha256sums=('8f4d5fef57cbe37b1aa6410a81bb204c39521e718a8a42f456f1c1ad30b69eb6')
 
 prepare() {
   cd "Rustranscript-$pkgver"

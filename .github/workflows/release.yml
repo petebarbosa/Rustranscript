@@ -1,5 +1,5 @@
-# Gera o AppImage e cria um rascunho de release no GitHub.
-# Disparo: push de uma tag `vX.Y.Z` (igual à versão do tauri.conf.json) ou manual em Actions.
+# Gera o AppImage. Push de uma tag `vX.Y.Z` (igual à versão do tauri.conf.json) cria um rascunho de release;
+# rodar manualmente em Actions só compila e guarda o AppImage como artefato (nunca mexe em releases).
 # Ubuntu 22.04 de propósito: o AppImage herda a glibc do build (2.35), e assim roda em distros mais antigas.
 name: release
 
@@ -43,7 +43,20 @@ jobs:
 
       - run: npm ci
 
+      - name: Build de teste (manual)
+        if: github.ref_type != 'tag'
+        run: npx tauri build
+
+      - uses: actions/upload-artifact@v7
+        if: github.ref_type != 'tag'
+        with:
+          name: appimage
+          path: target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+          retention-days: 7
+
       - uses: tauri-apps/tauri-action@v1
+        if: github.ref_type == 'tag'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

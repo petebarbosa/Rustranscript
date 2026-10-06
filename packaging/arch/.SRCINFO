@@ -1,6 +1,6 @@
 pkgbase = rustranscript
 	pkgdesc = Record and transcribe your meetings locally, with speaker separation
-	pkgver = 0.2.0
+	pkgver = 0.2.1
 	pkgrel = 1
 	url = https://github.com/petebarbosa/Rustranscript
 	arch = x86_64
@@ -21,7 +21,7 @@ pkgbase = rustranscript
 	optdepends = xdg-utils: open links and folders from the app
 	options = !lto
 	options = !debug
-	source = rustranscript-0.2.0.tar.gz::https://github.com/petebarbosa/Rustranscript/archive/refs/tags/v0.2.0.tar.gz
-	sha256sums = 5e5c5deb8e34771bf3a33be15f7f611de4bf0a3218dd9cc7268249c12ddcae0e
+	source = rustranscript-0.2.1.tar.gz::https://github.com/petebarbosa/Rustranscript/archive/refs/tags/v0.2.1.tar.gz
+	sha256sums = 4f65a5fc8e5355f67e5525a615d4473fc5c7cc76bcf00933112af052b4bf42c8
 
 pkgname = rustranscript

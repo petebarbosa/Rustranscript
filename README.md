@@ -90,7 +90,7 @@ transcription engine. Remove the folder to erase everything.
 Open work, tracked in [GitHub Issues](https://github.com/petebarbosa/Transcriptary/issues):
 
 - [#12](https://github.com/petebarbosa/Transcriptary/issues/12) Verify the Arch PKGBUILD with a full source build.
-- [#11](https://github.com/petebarbosa/Transcriptary/issues/11) Calibrate glossary hotwords and the speaker threshold with new calls.
+- [#11](https://github.com/petebarbosa/Transcriptary/issues/11) Measure whether glossary hotwords help, once glossaries have enough terms.
 
 ## Build from source
 

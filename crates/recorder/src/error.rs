@@ -12,6 +12,9 @@ pub enum Error {
     /// Falha de leitura no meio da captura (dispositivo sumiu etc.).
     #[error("capture failed: {0}")]
     Capture(String),
+    /// Falha ao tocar (servidor sumiu, fluxo caiu): o player (issue #22) para e avisa.
+    #[error("playback failed: {0}")]
+    Playback(String),
     #[error("invalid wav: {0}")]
     InvalidWav(String),
     /// Uso incorreto da API (pasta já tem gravação, nada para gravar, sessão já parada...).
@@ -35,6 +38,7 @@ impl Error {
             Error::DeviceNotFound(_) => "device_not_found",
             Error::OpenFailed(_) => "device_open_failed",
             Error::Capture(_) => "capture_failed",
+            Error::Playback(_) => "playback_failed",
             Error::InvalidWav(_) => "invalid_wav",
             Error::Session(_) => "invalid",
             Error::NotImplemented(_) => "not_implemented",
@@ -50,6 +54,7 @@ impl Error {
             | Error::DeviceNotFound(s)
             | Error::OpenFailed(s)
             | Error::Capture(s)
+            | Error::Playback(s)
             | Error::InvalidWav(s)
             | Error::Session(s) => s.clone(),
             Error::NotImplemented(s) => (*s).to_string(),

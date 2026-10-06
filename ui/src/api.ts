@@ -40,6 +40,18 @@ export interface CallDetail extends CallSummary {
   blocks: BlockInfo[]; deleted_blocks: BlockInfo[]; chapters: Chapter[]
   audio: { mic_path: string | null; sys_path: string | null; deleted_at: string | null }
 }
+/** `player_open`: o áudio da chamada pode tocar? Sem áudio: `reason` diz por quê (a tela explica, sem erro). */
+export interface PlayerInfo { available: boolean; reason: 'deleted' | 'none' | 'missing' | null; duration_s: number }
+/** Onda sonora: `data` = maior valor absoluto (0–255) de cada faixa de `duration_s / data.length` segundos. */
+export interface PeaksReply { per_s: number; duration_s: number; data: number[] }
+/** Evento `player-position` (~10 Hz tocando; a cada comando). `error` = [código, detalhe] quando `state` é 'error'. */
+export interface PlayerPosition {
+  library_id: number; call_id: number
+  state: 'paused' | 'playing' | 'ended' | 'error'
+  position_s: number; duration_s: number; speed: number; error: [string, string] | null
+}
+export const PLAYER_EVENT = 'player-position'
+
 export interface HistoryEntry {
   id: number; call_id: number; entity: 'block_text' | 'block_speaker' | 'call_title' | 'speaker_name' | 'block_deleted'
   entity_id: number; old_value: string | null; new_value: string | null
@@ -383,6 +395,14 @@ export const api = {
   queueRetry: (jobId: number) => call<JobInfo>('queue_retry', { jobId }),
   queuePause: (paused: boolean) => call<QueueStatus>('queue_pause', { paused }),
   bleedRemovals: (libraryId: number, transcriptId: number) => call<BleedRemoval[]>('bleed_removals', { libraryId, transcriptId }),
+  // ---- player de áudio (o som sai pelo Rust; aqui só comandos, e a posição volta pelo evento `player-position`)
+  playerOpen: (libraryId: number, callId: number) => call<PlayerInfo>('player_open', { libraryId, callId }),
+  playerPeaks: (libraryId: number, callId: number, buckets: number) => call<PeaksReply>('player_peaks', { libraryId, callId, buckets }),
+  playerPlay: () => call<void>('player_play'),
+  playerPause: () => call<void>('player_pause'),
+  playerSeek: (seconds: number) => call<void>('player_seek', { seconds }),
+  playerSpeed: (speed: number) => call<void>('player_speed', { speed }),
+  playerClose: (libraryId: number, callId: number) => call<void>('player_close', { libraryId, callId }),
 }
 
 export async function on<T>(event: string, fn: (payload: T) => void): Promise<UnlistenFn> {

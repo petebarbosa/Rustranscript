@@ -26,6 +26,7 @@ tar.workspace = true
 flate2.workspace = true
 libc.workspace = true
 num_cpus.workspace = true
+symphonia.workspace = true
 # só tipos do sidecar e reparo de WAV: sem o backend libpulse (o shell Tauri liga o backend)
 rstt-recorder = { path = "../recorder", default-features = false }
 
@@ -33,3 +34,5 @@ rstt-recorder = { path = "../recorder", default-features = false }
 tempfile.workspace = true
 claxon = "0.4"
 md-5 = "0.10"
+# só os exemplos (`player_probe`) tocam de verdade: ligam o backend libpulse que o núcleo não usa
+rstt-recorder = { path = "../recorder", features = ["pulse"] }

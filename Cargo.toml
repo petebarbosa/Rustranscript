@@ -24,6 +24,9 @@ tempfile = "3"
 libpulse-binding = "2.30"
 libpulse-simple-binding = "2.29"
 
+# player (issue #22): decodificação FLAC em streaming, com busca; só o codec FLAC (sem SIMD/rustfft). Licença MPL-2.0
+symphonia = { version = "0.6", default-features = false, features = ["flac"] }
+
 # transcrição (fase 4): download dos modelos/uv (TLS por rustls, sem cmake), verificação e extração
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
 sha2 = "0.10"
@@ -39,4 +42,10 @@ codegen-units = 1
 strip = true
 
 [profile.dev.package.flacenc]
+opt-level = 3
+
+# decodificar 2 h de áudio nos testes/medições sem otimização leva minutos
+[profile.dev.package.symphonia-bundle-flac]
+opt-level = 3
+[profile.dev.package.symphonia-core]
 opt-level = 3

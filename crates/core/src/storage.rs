@@ -22,8 +22,8 @@ use crate::{App, Error, Result, db};
 const AUDIO_FILES: [&str; 2] = ["mic.flac", "sys.flac"];
 
 /// Cache derivado do áudio (picos da onda do player, #22): qualquer arquivo da pasta da chamada cujo
-/// nome comece com `peaks` ou termine em `.peaks`. O nome exato do cache é do #22; este critério
-/// cobre os dois jeitos de chamá-lo sem depender do formato.
+/// nome comece com `peaks` ou termine em `.peaks`. O cache do #22 é `peaks.bin` (`player::PEAKS_FILE`); o
+/// prefixo também pega o `peaks.bin.part` que sobra se a gravação atômica for interrompida.
 fn is_derived_cache(name: &str) -> bool {
     name.starts_with("peaks") || name.ends_with(".peaks")
 }

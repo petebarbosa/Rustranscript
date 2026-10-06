@@ -604,7 +604,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     if (r) { await reload(); toast(t('call.saved')) }
   }
 
-  /** Refazer: separar vozes (nº de pessoas do outro lado), remontar, remontar sem o filtro de eco, ou transcrever tudo de novo. */
+  /** Refazer: separar vozes (teto de pessoas na chamada), remontar, remontar sem o filtro de eco, ou transcrever tudo de novo. */
   async function redoDialog() {
     const hasRaw = d.transcripts.find(v => v.id === d.transcript_id)?.has_raw ?? false
     const opt = (value: string, label: string, hint: string, extra = '', off = false) => `<label class="flex items-start gap-3 rounded-xl border border-white/10 bg-ink-950/50 p-3 text-sm ${off ? 'opacity-50' : 'cursor-pointer hover:border-violet-400/40'}">

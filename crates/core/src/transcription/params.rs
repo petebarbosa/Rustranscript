@@ -29,8 +29,12 @@ pub struct Params {
     pub vad_min_silence_ms: u32,
     pub low_priority: bool,
     pub diarization_threshold: f64,
+    /// Guarda no Rust (`fuse_clusters`, por tempo): 0 = desligada. Quem junta falantes é o worker, pela voz.
     pub min_cluster_pct: f64,
     pub min_cluster_s: f64,
+    /// Junção pela voz no worker (#25): cosseno mínimo entre centroides e fala mínima (s) para virar pessoa.
+    pub merge_similarity: f64,
+    pub min_speaker_s: f64,
     pub bleed: BleedParams,
 }
 
@@ -44,8 +48,10 @@ impl Default for Params {
             vad_min_silence_ms: 500,
             low_priority: true,
             diarization_threshold: 0.9,
-            min_cluster_pct: 5.0,
-            min_cluster_s: 10.0,
+            min_cluster_pct: 0.0,
+            min_cluster_s: 0.0,
+            merge_similarity: 0.75,
+            min_speaker_s: 15.0,
             bleed: BleedParams::default(),
         }
     }
@@ -56,7 +62,8 @@ impl Default for Params {
 pub struct JobOptions {
     #[serde(default)]
     pub language: Option<String>,
-    /// Pessoas do outro lado (sem contar o Eu) = `num_clusters` do worker. Ausente = `calls.expected_speakers`.
+    /// Pessoas do outro lado (sem contar o Eu) = TETO de falantes (`max_speakers` do worker), não meta: só quem fala
+    /// vira falante. Ausente = `calls.expected_speakers`; sem nenhum dos dois, sem teto.
     #[serde(default)]
     pub expected_speakers: Option<i64>,
     #[serde(default)]
@@ -86,6 +93,15 @@ fn flag(app: &App, key: &str, default: bool) -> Result<bool> {
 }
 
 impl Params {
+    /// Fusão por tempo para turnos de antes do #25 (sem a junção pela voz do worker): a configuração, se válida,
+    /// senão os padrões antigos (5 % / 10 s).
+    pub fn legacy_time_fuse(app: &App) -> Result<(f64, f64)> {
+        use super::keys;
+        let pct = parsed::<f64>(app, keys::DIARIZATION_MIN_CLUSTER_PCT)?.filter(|v| (0.0..=100.0).contains(v));
+        let secs = parsed::<f64>(app, keys::DIARIZATION_MIN_CLUSTER_S)?.filter(|v| v.is_finite() && *v >= 0.0);
+        Ok((pct.unwrap_or(5.0), secs.unwrap_or(10.0)))
+    }
+
     /// Lê as configurações (valor inválido/ausente = padrão) e aplica `options` por cima.
     pub fn from_settings(app: &App, options: &JobOptions) -> Result<Params> {
         use super::keys;
@@ -134,6 +150,12 @@ impl Params {
             min_cluster_s: parsed::<f64>(app, keys::DIARIZATION_MIN_CLUSTER_S)?
                 .filter(|v| v.is_finite() && *v >= 0.0)
                 .unwrap_or(d.min_cluster_s),
+            merge_similarity: parsed::<f64>(app, keys::DIARIZATION_MERGE_SIMILARITY)?
+                .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
+                .unwrap_or(d.merge_similarity),
+            min_speaker_s: parsed::<f64>(app, keys::DIARIZATION_MIN_SPEAKER_S)?
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                .unwrap_or(d.min_speaker_s),
             bleed,
         })
     }
@@ -152,6 +174,9 @@ mod tests {
         assert_eq!(p.beam_size, 5);
         assert!(p.threads >= 1 && p.threads <= 16);
         assert_eq!(p.bleed, BleedParams::default());
+        // #25: a regra por tempo (5 %) saiu do caminho padrão; quem junta é o worker, pela voz
+        assert_eq!((p.min_cluster_pct, p.min_cluster_s), (0.0, 0.0));
+        assert_eq!((p.merge_similarity, p.min_speaker_s, p.diarization_threshold), (0.75, 15.0, 0.9));
 
         app.set_setting("transcription_language", Some("pt-BR")).unwrap();
         app.set_setting("transcription_beam_size", Some("99")).unwrap(); // inválido -> padrão
@@ -161,6 +186,14 @@ mod tests {
         let p = Params::from_settings(&app, &JobOptions::default()).unwrap();
         assert_eq!((p.language.as_str(), p.beam_size, p.threads, p.bleed.margin_db), ("pt", 5, 3, 15.0));
         assert_eq!(p.diarization_threshold, 0.8);
+        app.set_setting("diarization_merge_similarity", Some("0.7")).unwrap();
+        app.set_setting("diarization_min_speaker_s", Some("30")).unwrap();
+        let p = Params::from_settings(&app, &JobOptions::default()).unwrap();
+        assert_eq!((p.merge_similarity, p.min_speaker_s), (0.7, 30.0));
+        app.set_setting("diarization_merge_similarity", Some("1.5")).unwrap(); // inválidos -> padrão
+        app.set_setting("diarization_min_speaker_s", Some("-1")).unwrap();
+        let p = Params::from_settings(&app, &JobOptions::default()).unwrap();
+        assert_eq!((p.merge_similarity, p.min_speaker_s), (0.75, 15.0));
 
         let o = JobOptions { language: Some("auto".into()), bleed_filter: Some(false), bleed_margin_db: Some(20.0), diarization_threshold: Some(0.7), ..Default::default() };
         let p = Params::from_settings(&app, &o).unwrap();

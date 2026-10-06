@@ -217,6 +217,7 @@ impl Engine for QuietMic {
                 speakers: None,
                 step_ms,
                 db: Some(vec![-45.0; db.len()]),
+                merge: None,
             }),
             other => other,
         })
@@ -662,6 +663,10 @@ fn rediarize_and_resegment_reuse_the_raw_data_and_keep_speaker_names() {
     assert_eq!(blocks_of(&lib, v3), blocks, "same raw data and parameters = same blocks");
     assert_eq!(versions(&lib, call).len(), 3);
     assert_eq!(j3.base_job_id, Some(job.id));
+    // a remontagem herda o diagnóstico da junção (a etapa `diarize` é clonada com o `info_json`)
+    let raw: String = lib.conn.query_row("SELECT params_json FROM transcripts WHERE id = ?1", [v3], |r| r.get(0)).unwrap();
+    let d = serde_json::from_str::<serde_json::Value>(&raw).unwrap()["diarization"].clone();
+    assert_eq!((d["merge"].clone(), d["time_fuse"].clone()), (serde_json::json!({ "raw": 3, "final": 3 }), serde_json::json!("off")));
 }
 
 #[test]
@@ -692,9 +697,10 @@ fn glossary_is_applied_to_text_but_not_to_original_text() {
     let (_, res) = e.run(&mut FakeEngine::new());
     let lib = e.lib();
     let detail = lib.call_detail(call, Some(done_id(&res))).unwrap();
-    // faixa única, mesma pessoa: os trechos vizinhos (< 1 s) são fundidos num bloco
-    assert_eq!(detail.blocks[0].text, "fala parte 0 fala parte 1 fala parte 2 fala parte 3");
-    assert_eq!(detail.blocks[0].original_text, "fala trecho 0 fala trecho 1 fala trecho 2 fala trecho 3");
+    // faixa única, mesma pessoa (0-15 s): os trechos vizinhos (< 1 s) são fundidos num bloco; a partir de 15 s o
+    // diarizador falso troca de pessoa (desde #25 a regra por tempo não a funde mais; quem junta é o worker)
+    assert_eq!(detail.blocks[0].text, "fala parte 0 fala parte 1 fala parte 2");
+    assert_eq!(detail.blocks[0].original_text, "fala trecho 0 fala trecho 1 fala trecho 2");
     assert!(!detail.blocks[0].edited);
     assert!(lib.history(Some(call), 10).unwrap().is_empty());
 }
@@ -836,6 +842,70 @@ fn the_muted_ranges_follow_the_mic_offset_per_track() {
     assert_eq!(find("diarize", ""), vec![(30.0, 40.0)]);
     let blocks = blocks_of(&lib, done_id(&res));
     assert!(inside(&blocks, 31.0, 39.0).is_empty());
+}
+
+#[test]
+fn the_informed_number_is_a_ceiling_and_the_merge_params_are_recorded() {
+    let e = env();
+    let call = e.call("call_a", Some(60), Some(60));
+    /// Guarda os campos de junção da requisição de diarização.
+    struct Rec(FakeEngine, std::sync::Arc<std::sync::Mutex<Vec<(Option<u32>, f64, f64)>>>);
+    impl Engine for Rec {
+        fn execute(&mut self, req: &ToWorker, on_event: &mut dyn FnMut(&FromWorker) -> Flow) -> Result<Terminal> {
+            if let ToWorker::Diarize { max_speakers, merge_similarity, min_speaker_s, .. } = req {
+                self.1.lock().unwrap().push((*max_speakers, *merge_similarity, *min_speaker_s));
+            }
+            self.0.execute(req, on_event)
+        }
+        fn shutdown(&mut self) {}
+    }
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    e.enqueue(call, JobKind::Full, JobOptions { expected_speakers: Some(3), ..Default::default() });
+    let (_, res) = e.run(&mut Rec(FakeEngine::new(), log.clone()));
+    // padrões do #25: teto = o número informado; junção pela voz em 0,75 / 15 s
+    assert_eq!(log.lock().unwrap().clone(), vec![(Some(3), 0.75, 15.0)]);
+    let lib = e.lib();
+    let raw: String = lib.conn.query_row("SELECT params_json FROM transcripts WHERE id = ?1", [done_id(&res)], |r| r.get(0)).unwrap();
+    let d = serde_json::from_str::<serde_json::Value>(&raw).unwrap()["diarization"].clone();
+    assert_eq!(d["max_speakers"], 3);
+    assert_eq!(d["expected_speakers"], 3);
+    assert_eq!((d["merge_similarity"].as_f64(), d["min_speaker_s"].as_f64()), (Some(0.75), Some(15.0)));
+    assert_eq!((d["min_cluster_pct"].as_f64(), d["min_cluster_s"].as_f64()), (Some(0.0), Some(0.0)), "a regra dos 5 % saiu");
+    assert_eq!(d["merge"], serde_json::json!({ "raw": 3, "final": 3 }));
+}
+
+#[test]
+fn turns_without_a_voice_merge_keep_the_old_time_fusion() {
+    // worker de antes do #25 (ou runtime não atualizado): o resultado não traz `merge`
+    struct Old(FakeEngine);
+    impl Engine for Old {
+        fn execute(&mut self, req: &ToWorker, on_event: &mut dyn FnMut(&FromWorker) -> Flow) -> Result<Terminal> {
+            Ok(match self.0.execute(req, on_event)? {
+                Terminal::Result(FromWorker::Result { id, segments, seconds, language, turns, speakers, step_ms, db, .. }) => {
+                    Terminal::Result(FromWorker::Result { id, segments, seconds, language, turns, speakers, step_ms, db, merge: None })
+                }
+                other => other,
+            })
+        }
+        fn shutdown(&mut self) {}
+    }
+    let diar = |e: &Env, engine: &mut dyn Engine| {
+        let call = e.call("call_a", None, Some(20));
+        e.enqueue(call, JobKind::Full, JobOptions::default());
+        let (_, res) = e.run(engine);
+        let lib = e.lib();
+        let raw: String = lib.conn.query_row("SELECT params_json FROM transcripts WHERE id = ?1", [done_id(&res)], |r| r.get(0)).unwrap();
+        let labels: std::collections::BTreeSet<String> = blocks_of(&lib, done_id(&res)).into_iter().map(|b| b.0).collect();
+        (labels, serde_json::from_str::<serde_json::Value>(&raw).unwrap()["diarization"].clone())
+    };
+    // o falso troca de pessoa em 15 s (5 s de fala < 10 s): sem `merge` a fusão por tempo antiga junta
+    let (labels, d) = diar(&env(), &mut Old(FakeEngine::new()));
+    assert_eq!(labels, ["Pessoa 1".to_string()].into_iter().collect());
+    assert_eq!((d["time_fuse"].clone(), d["merge"].clone(), d["min_cluster_s"].as_f64()), (serde_json::json!("legacy"), serde_json::Value::Null, Some(10.0)));
+    // com `merge` (worker novo) a pessoa de 5 s fica: quem junta é o worker
+    let (labels, d) = diar(&env(), &mut FakeEngine::new());
+    assert_eq!(labels, ["Pessoa 1".to_string(), "Pessoa 2".to_string()].into_iter().collect());
+    assert_eq!(d["time_fuse"], "off");
 }
 
 #[test]

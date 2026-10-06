@@ -269,8 +269,8 @@ export const TRANSCRIPTION_EVENTS = {
 export const TRANSCRIPTION_DEFAULTS = {
   transcription_language: 'pt', transcription_auto: '1', transcription_hotwords: '1', transcription_beam_size: '5',
   transcription_threads: '0', transcription_vad_min_silence_ms: '500', transcription_low_priority: '1',
-  transcription_queue_paused: '0', diarization_threshold: '0.9', diarization_min_cluster_pct: '5',
-  diarization_min_cluster_s: '10', bleed_filter: '1', bleed_margin_db: '15', bleed_containment: '0.6',
+  transcription_queue_paused: '0', diarization_threshold: '0.9', diarization_min_cluster_pct: '0',
+  diarization_min_cluster_s: '0', diarization_merge_similarity: '0.75', diarization_min_speaker_s: '15', bleed_filter: '1', bleed_margin_db: '15', bleed_containment: '0.6',
   bleed_min_words: '4', bleed_tolerance_s: '0.75',
 } as const
 /** rótulos canônicos gravados no banco; a UI os traduz ('Eu' → settings.me_name ou t('speaker.me'); 'Pessoa N' → t('speaker.person')) */

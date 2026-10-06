@@ -75,7 +75,7 @@ pub struct Assembled {
     pub clusters: usize,
 }
 
-/// Montagem completa (ordem fixa do contrato §6): offset → fusão de clusters → filtro de vazamento →
+/// Montagem completa (ordem fixa do contrato §6): offset → guarda de clusters (`fuse_clusters`) → filtro de vazamento →
 /// atribuição por palavra → rótulos → blocos.
 pub fn assemble(input: &AssembleInput) -> Result<Assembled> {
     let p = input.params;
@@ -236,7 +236,8 @@ fn gap(a0: f64, a1: f64, b0: f64, b1: f64) -> f64 {
 
 /// Funde clusters com < `min_pct` % da fala total ou < `min_s` s de fala no cluster maior mais sobreposto/
 /// próximo (por tempo). Devolve turnos com rótulos 0..n renumerados por tempo total de fala (maior = 0).
-/// O maior cluster nunca é fundido (sempre sobra ao menos um).
+/// O maior cluster nunca é fundido (sempre sobra ao menos um). Desde #25 é só uma guarda: o padrão é 0/0 (nada
+/// é fundido por tempo; só renumera) porque o worker já junta os grupos pela voz.
 pub fn fuse_clusters(turns: &[Turn], min_pct: f64, min_s: f64) -> Result<Vec<Turn>> {
     let mut speech: BTreeMap<i64, f64> = BTreeMap::new();
     for t in turns {

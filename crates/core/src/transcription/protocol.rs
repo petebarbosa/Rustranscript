@@ -35,9 +35,14 @@ pub enum ToWorker {
         audio: String,
         seg_model: String,
         emb_model: String,
-        /// dica (nunca garantia); `None` = usar `threshold`
-        num_clusters: Option<u32>,
+        /// Teto de falantes (o número que o usuário informa; nunca meta): o agrupamento roda pelo `threshold` e,
+        /// se sobrar gente demais, o worker junta os mais parecidos. `None` = sem teto.
+        max_speakers: Option<u32>,
         threshold: f64,
+        /// Junção pela voz (#25): cosseno mínimo entre centroides para ser a mesma pessoa...
+        merge_similarity: f64,
+        /// ... e segundos de fala abaixo dos quais o grupo não vira pessoa (junta ao mais parecido).
+        min_speaker_s: f64,
         threads: u32,
         /// Como em `Transcribe`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -105,7 +110,7 @@ pub enum FromWorker {
         words: Option<Vec<WordTime>>,
     },
     /// Fim normal. Campos por tipo de pedido: transcribe = `segments`, `seconds`, `language`;
-    /// diarize = `turns`, `speakers`; energy = `step_ms`, `db`.
+    /// diarize = `turns`, `speakers`, `merge`; energy = `step_ms`, `db`.
     Result {
         id: String,
         #[serde(default)]
@@ -122,6 +127,10 @@ pub enum FromWorker {
         step_ms: Option<u32>,
         #[serde(default)]
         db: Option<Vec<f32>>,
+        /// diarize: diagnóstico da junção pela voz `{raw, final, clusters: [[fala_s, junta_em, cos]]}` (só números).
+        /// Campo aditivo: um worker que não o manda continua válido.
+        #[serde(default)]
+        merge: Option<serde_json::Value>,
     },
     Cancelled { id: String, #[serde(default)] segments: u64 },
     /// `code`: `audio_decode` | `model_missing` | `oom` | `bad_request` | `not_implemented` | `exception`.
@@ -171,6 +180,19 @@ mod tests {
     }
 
     #[test]
+    fn diarize_request_carries_ceiling_and_merge_fields() {
+        let d = ToWorker::Diarize {
+            id: "d".into(), audio: "/a".into(), seg_model: "/s".into(), emb_model: "/e".into(),
+            max_speakers: Some(6), threshold: 0.9, merge_similarity: 0.75, min_speaker_s: 15.0, threads: 2, mute: vec![],
+        };
+        let v: serde_json::Value = serde_json::from_str(&to_line(&d)).unwrap();
+        assert_eq!(v["type"], "diarize");
+        assert_eq!((v["max_speakers"].as_u64(), v["merge_similarity"].as_f64(), v["min_speaker_s"].as_f64()), (Some(6), Some(0.75), Some(15.0)));
+        assert!(v.get("num_clusters").is_none());
+        assert_eq!(serde_json::from_str::<ToWorker>(&to_line(&d)).unwrap(), d);
+    }
+
+    #[test]
     fn parses_worker_lines() {
         let h = parse_line(r#"{"type":"hello","protocol":1,"worker":"0.1.0","pid":7,"python":"3.12.15","faster_whisper":null,"sherpa_onnx":null}"#).unwrap();
         assert!(matches!(h, FromWorker::Hello { protocol: 1, fake: false, .. }));
@@ -178,6 +200,10 @@ mod tests {
         assert!(matches!(s, FromWorker::Segment { words: Some(ref w), .. } if w.len() == 1));
         let r = parse_line(r#"{"type":"result","id":"j","turns":[{"start":0.7,"end":6.1,"speaker":0}],"speakers":1}"#).unwrap();
         assert!(matches!(r, FromWorker::Result { turns: Some(ref t), .. } if t.len() == 1));
+        // campo aditivo do #25: o diagnóstico da junção vem (ou não) e a leitura aceita as duas formas
+        assert!(matches!(r, FromWorker::Result { merge: None, .. }));
+        let r = parse_line(r#"{"type":"result","id":"j","turns":[],"speakers":2,"merge":{"raw":9,"final":2,"clusters":[[120.5,null,null],[3.1,0,0.42]]},"novo":1}"#).unwrap();
+        assert!(matches!(r, FromWorker::Result { merge: Some(ref m), .. } if m["raw"] == 9 && m["final"] == 2));
         assert_eq!(parse_line("não é json").unwrap_err().code(), "worker_protocol");
     }
 }

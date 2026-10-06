@@ -52,7 +52,7 @@ fn transcribe(id: &str, audio: &Path, track: &str, start_s: f64) -> ToWorker {
 }
 
 fn diarize(id: &str, audio: &Path, clusters: Option<u32>) -> ToWorker {
-    ToWorker::Diarize { id: id.into(), audio: audio.display().to_string(), seg_model: "/x".into(), emb_model: "/y".into(), num_clusters: clusters, threshold: 0.7, threads: 1, mute: vec![] }
+    ToWorker::Diarize { id: id.into(), audio: audio.display().to_string(), seg_model: "/x".into(), emb_model: "/y".into(), max_speakers: clusters, threshold: 0.7, merge_similarity: 0.75, min_speaker_s: 15.0, threads: 1, mute: vec![] }
 }
 
 fn alive(pid: u32) -> bool {

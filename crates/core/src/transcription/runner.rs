@@ -314,24 +314,27 @@ impl Run<'_> {
                 && !staging::stage_done(&self.lib, job.id, StageKey::Diarize)?
             {
                 stop!();
-                let num_clusters = job.options.expected_speakers.or(call.expected_speakers).filter(|n| *n >= 1).map(|n| n as u32);
+                // o número informado é só teto (#25): o worker agrupa pela voz e junta o que passar dele
+                let max_speakers = job.options.expected_speakers.or(call.expected_speakers).filter(|n| *n >= 1).map(|n| n as u32);
                 let req = ToWorker::Diarize {
                     id: key("diarize"),
                     audio: path(sys),
                     seg_model: path(&paths.seg_model),
                     emb_model: path(&paths.emb_model),
-                    num_clusters,
+                    max_speakers,
                     threshold: params.diarization_threshold,
+                    merge_similarity: params.merge_similarity,
+                    min_speaker_s: params.min_speaker_s,
                     threads: params.threads,
                     mute: track_mute(&job.options.cuts, Track::Sys, call.offset_s),
                 };
                 if let Some(res) = self.call(engine, &req, None, Stage::Diarize)? {
-                    let FromWorker::Result { turns: Some(turns), speakers, .. } = res else {
+                    let FromWorker::Result { turns: Some(turns), speakers, merge, .. } = res else {
                         return Err(Error::transcription("worker_protocol", "diarize without turns"));
                     };
                     let turns: Vec<Turn> = turns.iter().map(|t| Turn { start: t.start, end: t.end, cluster: t.speaker }).collect();
                     staging::set_turns(&mut self.lib, job.id, &turns)?;
-                    staging::mark_stage_done(&mut self.lib, job.id, StageKey::Diarize, Some(&serde_json::json!({ "speakers": speakers })))?;
+                    staging::mark_stage_done(&mut self.lib, job.id, StageKey::Diarize, Some(&serde_json::json!({ "speakers": speakers, "merge": merge })))?;
                 }
                 stop!();
             }
@@ -344,6 +347,17 @@ impl Run<'_> {
         let turns = staging::turns(&self.lib, job.id)?;
         let (sys_energy, mic_energy) = (staging::energy(&self.lib, job.id, Track::Sys)?, staging::energy(&self.lib, job.id, Track::Mic)?);
         let previous = self.previous_blocks()?;
+        let diar_info = staging::stage_info(&self.lib, job.id, StageKey::Diarize).ok().flatten();
+        let merge_summary = diar_info
+            .as_ref()
+            .and_then(|v| v.get("merge").filter(|m| m.is_object()))
+            .map(|m| serde_json::json!({ "raw": m["raw"], "final": m["final"] }));
+        // turnos de antes do #25 (worker 0.3.0 ou runtime ainda não atualizado: sem `merge`) saem do clustering
+        // sem a junção pela voz; para eles a fusão por tempo antiga continua valendo (as configurações mandam)
+        let legacy = !turns.is_empty() && merge_summary.is_none();
+        if legacy {
+            (params.min_cluster_pct, params.min_cluster_s) = Params::legacy_time_fuse(self.app)?;
+        }
         let assembled = assemble::assemble(&AssembleInput {
             sys: &sys,
             mic: &mic,
@@ -371,7 +385,15 @@ impl Run<'_> {
                 "threshold": params.diarization_threshold,
                 "min_cluster_pct": params.min_cluster_pct,
                 "min_cluster_s": params.min_cluster_s,
+                "merge_similarity": params.merge_similarity,
+                "min_speaker_s": params.min_speaker_s,
+                // o número informado é teto de falantes (#25); `merge` = contagem bruta/final da junção pela voz
                 "expected_speakers": job.options.expected_speakers.or(call.expected_speakers),
+                "max_speakers": job.options.expected_speakers.or(call.expected_speakers),
+                "merge": merge_summary,
+                // `legacy`: turnos sem junção pela voz, fundidos por tempo; `guard`: fusão por tempo ligada nas
+                // configurações; `off`: só a junção pela voz do worker
+                "time_fuse": if legacy { "legacy" } else if params.min_cluster_pct > 0.0 || params.min_cluster_s > 0.0 { "guard" } else { "off" },
             },
             "bleed": params.bleed,
         });

@@ -161,6 +161,8 @@ impl Run<'_> {
     fn call(&mut self, engine: &mut dyn Engine, req: &ToWorker, track: Option<Track>, asr_stage: Stage) -> Result<Option<FromWorker>> {
         let mut failure: Option<Error> = None;
         let job_id = self.job.id;
+        // o progresso do ASR nunca recua dentro de um pedido (o worker já garante; aqui é a rede de segurança)
+        let mut asr_high = 0.0_f64;
         let term = engine.execute(req, &mut |msg| {
             if failure.is_none() {
                 match msg {
@@ -179,7 +181,11 @@ impl Run<'_> {
                         };
                         match stage.as_str() {
                             "loading_model" => self.emit(Stage::LoadingModel, None, None, None),
-                            "transcribe" => self.emit(asr_stage, frac(*audio_s, *total_s), *audio_s, *total_s),
+                            "transcribe" => {
+                                let audio = audio_s.map(|a| a.max(asr_high));
+                                asr_high = audio.unwrap_or(asr_high);
+                                self.emit(asr_stage, frac(audio, *total_s), audio, *total_s)
+                            }
                             "diarize_segmentation" => {
                                 let f = frac(done.map(|d| d as f64), total.map(|t| t as f64)).filter(|f| *f < 1.0);
                                 self.emit(Stage::Diarize, f, None, None)

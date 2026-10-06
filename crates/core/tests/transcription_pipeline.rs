@@ -11,7 +11,7 @@ use core_lib::transcription::models;
 use core_lib::transcription::params::JobOptions;
 use core_lib::transcription::protocol::{FromWorker, ToWorker};
 use core_lib::transcription::queue::{self, JobKind, JobState};
-use core_lib::transcription::runner::{self, CancelReason, RunEnd};
+use core_lib::transcription::runner::{self, CancelReason, RunEnd, Stage};
 use core_lib::transcription::staging::{self, Track};
 use core_lib::{App, Error, Library, Result};
 
@@ -225,6 +225,23 @@ impl Engine for QuietMic {
 }
 
 // ------------------------------------------------------------------ testes
+
+/// Issue #8: cada trilha mostra progresso ANTES de o 1º trecho (janela) terminar, nunca recua e fecha em 100 %.
+#[test]
+fn asr_progress_starts_early_never_regresses_and_ends_at_100() {
+    let e = env();
+    let call = e.call("call_p", Some(60), Some(60));
+    e.enqueue(call, JobKind::Full, JobOptions::default());
+    let mut progress = Vec::new();
+    runner::run_next(&e.app, &mut FakeEngine::new(), &|_| None, &mut |p| progress.push(p.clone())).unwrap().unwrap();
+    for stage in [Stage::AsrSys, Stage::AsrMic] {
+        let f: Vec<f64> = progress.iter().filter(|p| p.stage == stage).filter_map(|p| p.fraction).collect();
+        // o 1º trecho só termina em 4,5 s de 60; o 1º progresso (2,25 s) chega antes dele
+        assert_eq!(f.first().copied(), Some(2.25 / 60.0), "{stage:?}");
+        assert!(f.windows(2).all(|w| w[0] <= w[1]), "{stage:?} recuou: {f:?}");
+        assert_eq!(f.last().copied(), Some(1.0), "{stage:?}");
+    }
+}
 
 /// Exemplo da API: chamada com duas trilhas → fila → versão pronta (blocos Eu / Pessoa N, bruto preservado).
 #[test]

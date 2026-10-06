@@ -182,6 +182,20 @@ class FakeTranscribe(FakeBase):
         self.assertEqual(prog[-1]["audio_s"], 23.0)
 
 
+    def test_progress_arrives_inside_first_window_and_never_regresses(self):
+        # issue #8: o progresso sai antes do 1º segmento (não fica em 0 até a janela terminar) e fecha em 100 %
+        self.w.send(self.transcribe())
+        msgs = self.w.until()
+        first_seg = next(i for i, m in enumerate(msgs) if m["type"] == "segment")
+        early = [m for m in msgs[:first_seg] if m["type"] == "progress" and m["stage"] == "transcribe"
+                 and m["audio_s"] > 0]
+        self.assertEqual([m["audio_s"] for m in early], [2.25])
+        audio = [m["audio_s"] for m in msgs if m["type"] == "progress" and m["stage"] == "transcribe"]
+        self.assertEqual(audio, sorted(audio))
+        self.assertEqual(audio[-1], 23.0)
+        self.assertEqual(msgs[-2]["type"], "progress")  # o 100 % vem logo antes do resultado
+
+
 class FakeDiarizeEnergy(FakeBase):
     def diarize(self, rid="d1", n=None):
         return {"type": "diarize", "id": rid, "audio": self.sys_flac, "seg_model": "/s", "emb_model": "/e",

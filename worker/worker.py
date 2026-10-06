@@ -207,6 +207,8 @@ def fake_transcribe(ctx, p):
     prefix = "eu trecho" if p["track"] == "mic" else "fala trecho"
     n, k = 0, math.ceil(start_s / 5.0)
     while k * 5 < dur:
+        # progresso parcial dentro da "janela" (o worker real estima o mesmo antes de a janela terminar)
+        send({"type": "progress", "id": rid, "stage": "transcribe", "audio_s": min(k * 5.0 + 2.25, dur), "total_s": dur})
         ctx.pause(delay)
         if ctx.cancelled():
             return send_cancelled(rid, n)
@@ -220,6 +222,7 @@ def fake_transcribe(ctx, p):
         send(seg)
         send({"type": "progress", "id": rid, "stage": "transcribe", "audio_s": end, "total_s": dur})
         n, k = n + 1, k + 1
+    send({"type": "progress", "id": rid, "stage": "transcribe", "audio_s": dur, "total_s": dur})  # fecha em 100 %
     send({"type": "result", "id": rid, "segments": n, "seconds": 0.0, "language": p["language"] or "pt"})
 
 
@@ -288,6 +291,70 @@ def load_whisper(model_dir, threads):
     return model
 
 
+class ProgressPacer:
+    """Progresso do ASR sem esperar o fim da janela de ~30 s.
+
+    O faster-whisper só entrega segmentos ao fim de cada janela (e roda o VAD antes da 1ª), então sem isto a
+    trilha fica em 0 % por dezenas de segundos. Enquanto a próxima janela não chega, uma thread estima a posição
+    (curva que sobe rápido e satura em 90 % da janela, com tempo característico aprendido da janela anterior).
+    É só estimativa: nunca passa do fim da janela, nunca decresce e o valor real (fim do último segmento) só
+    é enviado se superar o que já foi mostrado. O 100 % exato sai em `finish`.
+    """
+
+    WINDOW_S = 30.0
+    TICK_S = 1.0
+
+    def __init__(self, rid, start_s, total):
+        self.rid, self.total = rid, total
+        self.lock = threading.Lock()
+        self.stop = threading.Event()
+        self.shown = self.anchor = min(start_s, total)  # último valor enviado / posição real conhecida
+        self.t_anchor = time.monotonic()
+        self.tau = 4.0  # s até ~90 % da janela; reaprendido a cada janela concluída
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def _emit(self, audio_s):  # chamar com o lock
+        if audio_s > self.shown:
+            self.shown = audio_s
+            send({"type": "progress", "id": self.rid, "stage": "transcribe", "audio_s": round(audio_s, 3),
+                  "total_s": self.total})
+
+    def _run(self):
+        while not self.stop.wait(self.TICK_S):
+            with self.lock:
+                if self.stop.is_set():  # `abort`/`finish` chegaram enquanto esperava o lock
+                    break
+                window = min(self.WINDOW_S, self.total - self.anchor)
+                elapsed = time.monotonic() - self.t_anchor
+                self._emit(self.anchor + 0.9 * window * (1.0 - math.exp(-elapsed / self.tau)))
+
+    def start(self):
+        self.thread.start()
+
+    def real(self, end):
+        """Fim de um segmento já decodificado (posição real no arquivo)."""
+        with self.lock:
+            now = time.monotonic()
+            gap = now - self.t_anchor
+            if gap >= 0.5:  # segmentos da mesma janela chegam colados: só um intervalo longo mede uma janela
+                self.tau = min(max(gap / 2.3, 1.0), 20.0)
+            self.anchor, self.t_anchor = max(self.anchor, min(end, self.total)), now
+            self._emit(self.anchor)
+
+    def finish(self):
+        """Para a estimativa e fecha em 100 % (o fim do último segmento costuma ficar antes do fim do arquivo)."""
+        self.stop.set()
+        self.thread.join(timeout=5)
+        with self.lock:
+            self._emit(self.total)
+
+    def abort(self):
+        """Para a estimativa; ao voltar, a thread não envia mais nada (o lock espera um `_emit` em curso)."""
+        self.stop.set()
+        with self.lock:
+            pass
+
+
 def real_transcribe(ctx, p):
     rid, t0 = ctx.id, time.perf_counter()
     send({"type": "progress", "id": rid, "stage": "loading_model"})
@@ -303,26 +370,33 @@ def real_transcribe(ctx, p):
     model = load_whisper(p["model_dir"], p["threads"])
     if ctx.cancelled():
         return send_cancelled(rid, 0)
-    segments, info = model.transcribe(
-        clip, language=p["language"], beam_size=p["beam_size"], vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": p["vad_min_silence_ms"]},
-        condition_on_previous_text=False, hotwords=p["hotwords"] or None,
-        word_timestamps=p["word_timestamps"],
-    )
-    n = 0
-    for s in segments:  # gerador: cada janela de ~30 s decodifica ao iterar
-        text = s.text.strip()
-        end = s.end + start_s
-        if text:
-            msg = {"type": "segment", "id": rid, "start": round(s.start + start_s, 3), "end": round(end, 3), "text": text}
-            if s.words:
-                msg["words"] = [[round(w.start + start_s, 3), round(w.end + start_s, 3), w.word.strip()]
-                                for w in s.words if w.word.strip()]
-            send(msg)
-            n += 1
-        send({"type": "progress", "id": rid, "stage": "transcribe", "audio_s": round(min(end, total), 3), "total_s": total})
-        if ctx.cancelled():
-            return send_cancelled(rid, n)
+    pacer = ProgressPacer(rid, start_s, total)
+    pacer.start()  # cobre o VAD (dentro de transcribe) e a 1ª janela
+    try:
+        segments, info = model.transcribe(
+            clip, language=p["language"], beam_size=p["beam_size"], vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": p["vad_min_silence_ms"]},
+            condition_on_previous_text=False, hotwords=p["hotwords"] or None,
+            word_timestamps=p["word_timestamps"],
+        )
+        n = 0
+        for s in segments:  # gerador: cada janela de ~30 s decodifica ao iterar
+            text = s.text.strip()
+            end = s.end + start_s
+            if text:
+                msg = {"type": "segment", "id": rid, "start": round(s.start + start_s, 3), "end": round(end, 3), "text": text}
+                if s.words:
+                    msg["words"] = [[round(w.start + start_s, 3), round(w.end + start_s, 3), w.word.strip()]
+                                    for w in s.words if w.word.strip()]
+                send(msg)
+                n += 1
+            pacer.real(end)
+            if ctx.cancelled():
+                pacer.abort()  # nada de `progress` depois do `cancelled`
+                return send_cancelled(rid, n)
+        pacer.finish()
+    finally:
+        pacer.abort()
     send({"type": "result", "id": rid, "segments": n, "seconds": round(time.perf_counter() - t0, 2),
           "language": info.language})
 

@@ -97,6 +97,10 @@ impl Engine for FakeEngine {
                     if start >= dur {
                         break;
                     }
+                    // progresso parcial dentro da "janela", antes de ela terminar (como o worker Python)
+                    if on_event(&progress("transcribe", Some((start + 2.25).min(dur)))) == Flow::Cancel {
+                        return Ok(Terminal::Cancelled { segments: emitted });
+                    }
                     if self.delay_ms > 0 {
                         std::thread::sleep(Duration::from_millis(self.delay_ms));
                     }
@@ -120,6 +124,9 @@ impl Engine for FakeEngine {
                     if cancel {
                         return Ok(Terminal::Cancelled { segments: emitted });
                     }
+                }
+                if on_event(&progress("transcribe", Some(dur))) == Flow::Cancel {
+                    return Ok(Terminal::Cancelled { segments: emitted });
                 }
                 Ok(Terminal::Result(FromWorker::Result {
                     id: id.clone(),

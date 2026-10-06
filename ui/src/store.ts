@@ -15,6 +15,8 @@ export interface View {
   dispose?: () => void
   /** true enquanto o usuário edita algo: a atualização automática espera. */
   busy?: () => boolean
+  /** Antes de sair da tela (ou do app): salva o que está digitado. `false` = falhou; fica na tela com o texto preservado. */
+  leave?: () => Promise<boolean>
 }
 
 export const meName = () => store.boot.settings.me_name

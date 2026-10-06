@@ -940,6 +940,8 @@ function txTick() {
   demo.transcripts[0].id = demo.transcript_id = ++seq
   demo.transcripts[0].has_raw = true
   demo.transcripts[0].source_file = null
+  // 2ª versão: o cabeçalho da chamada fica no pior caso (seletor de versão + Falantes + Eco + Refazer)
+  addVersion(demo, 'large-v3', [[3, 'Pessoa 1', 'Bom dia a todos (segunda versão).'], [18, 'Eu', 'Bom dia.']])
   calls.push(demo)
   bleedBy.set(demo.transcript_id, ECHO.map((text, i) => ({
     id: i + 1, t_start: 40 + i * 70, t_end: 44 + i * 70, text, containment: 0.8 + i * 0.05, margin_db: i === 2 ? null : -22.1 - i * 3.4,

@@ -45,8 +45,6 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
   const loadBleed = async () => { bleed = d.transcript_id == null ? [] : await api.bleedRemovals(libraryId, d.transcript_id).catch(() => []) }
   await loadBleed()
   const dismissed = new Set<number>()
-  let editing = (() => { try { return localStorage.getItem('edit-mode') === '1' } catch { return false } })()
-  const timers = new Map<number, ReturnType<typeof setTimeout>>()
   let io: IntersectionObserver | null = null
   let ro: ResizeObserver | null = null
 
@@ -64,8 +62,9 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     const me = s?.track === 'mic'
     const edited = b.edited ? ` data-edited title="${esc(t('call.original', { text: b.original_text }))}"` : ''
     return `<article id="b-${b.id}" data-block="${b.id}"${edited} class="flex ${me ? 'justify-end' : 'justify-start'}">
-      <div class="min-w-[14rem] max-w-[46rem] rounded-2xl border ${box} px-4 py-3 shadow-sm">
-        <div class="mb-1 flex items-center gap-2 text-xs">
+      <div class="relative min-w-[14rem] max-w-[46rem] rounded-2xl border ${box} px-4 py-3 shadow-sm">
+        <button type="button" data-edit title="${esc(t('call.edit_block'))}" aria-label="${esc(t('call.edit_block'))}" class="absolute right-2 top-2 rounded-lg px-1.5 py-0.5 text-sm leading-none text-zinc-500 hover:bg-white/5 hover:text-violet-300 focus-visible:outline focus-visible:outline-1 focus-visible:outline-violet-400/60">✎</button>
+        <div class="mb-1 flex items-center gap-2 pr-7 text-xs">
           <button type="button" data-speaker-btn class="font-semibold ${label}">${esc(nameOf(s))}</button>
           <a href="#/call/${libraryId}/${callId}?b=${b.id}" data-anchor class="font-mono text-zinc-500 hover:text-zinc-200">${fmtTime(b.t_start)}</a>
           <span data-badge class="hidden items-center rounded-full bg-amber-400/10 px-2 py-px text-[10px] font-medium text-amber-300">${esc(t('call.edited'))}</span>
@@ -148,7 +147,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     const place = lib?.kind === 'inbox' ? t('nav.unclassified') : [lib?.name, d.client_name ?? t('nav.no_client')].join(' · ')
     const back = lib?.kind === 'inbox' ? '#/unclassified' : d.client_id ? `#/lib/${d.library_id}/client/${d.client_id}` : `#/lib/${d.library_id}`
     const chip = (s: string) => `<span class="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-0.5 text-xs text-zinc-400">${esc(s)}</span>`
-    const pill = 'rounded-full border border-white/10 bg-ink-900 px-2.5 py-0.5 text-xs text-zinc-300 hover:border-violet-400/50 hover:text-white'
+    const pill = 'shrink-0 whitespace-nowrap rounded-full border border-white/10 bg-ink-900 px-2.5 py-0.5 text-xs text-zinc-300 hover:border-violet-400/50 hover:text-white'
     const pj = pending ? jobForCall(libraryId, callId) : undefined
     const pk = pj ? (pj.state === 'running' ? 'running' : pj.state === 'queued' ? 'queued' : 'failed') : d.transcription_state === 'done' ? 'pending' : d.transcription_state
     const versions = d.transcripts.length > 1
@@ -175,25 +174,23 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
             ? `<span class="rounded-full border px-2.5 py-0.5 text-xs ${pk === 'failed' ? 'border-rose-400/30 bg-rose-400/10 text-rose-300' : pk === 'running' ? 'border-sky-400/30 bg-sky-400/10 text-sky-300' : pk === 'queued' ? 'border-violet-400/30 bg-violet-400/10 text-violet-300' : 'border-amber-400/30 bg-amber-400/10 text-amber-300'}">${esc(t(`transcription.${pk}`))}</span>`
             : chip(t('list.words', { n: d.words, count: fmtNumber(d.words) }))}
           ${versions}
-          ${pending ? '' : `<span class="ml-auto flex flex-wrap items-center gap-1.5">
+          ${pending ? '' : `<span class="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1.5">
             <button type="button" id="speakers-btn" class="${pill}">${esc(t('call.speakers'))}</button>
             ${bleed.length ? `<button type="button" id="bleed-btn" class="${pill}">${esc(t('call.bleed_title', { n: bleed.length }))}</button>` : ''}
             <button type="button" id="redo-btn" class="${pill}">${esc(t('call.redo'))}</button></span>`}
         </div>
         <div id="job-strip" class="mt-2 empty:hidden">${jobStripHtml()}</div>
-        <div class="mt-3 flex items-center gap-2">
-          <div class="relative flex-1" ${pending ? 'hidden' : ''}>
+        <div class="mt-3 flex flex-wrap items-center gap-2">
+          <div class="relative min-w-[12rem] flex-1" ${pending ? 'hidden' : ''}>
             <input id="q" type="search" autocomplete="off" placeholder="${esc(t('call.search'))}"
               class="w-full rounded-xl border border-white/10 bg-ink-900 py-2 pl-4 pr-28 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-violet-400/60 focus:outline-none focus:ring-2 focus:ring-violet-400/20">
             <span id="count" class="pointer-events-none absolute right-3 top-2 text-xs text-zinc-500"></span>
           </div>
-          <button id="assign" type="button" class="shrink-0 rounded-xl border border-white/10 bg-ink-900 px-3 py-2 text-sm text-zinc-300 hover:border-violet-400/50">${esc(t('call.assign'))}</button>
-          <button id="apply-glossary" type="button" ${pending ? 'hidden' : ''} title="${esc(t('glossary.apply_hint'))}" class="shrink-0 rounded-xl border border-white/10 bg-ink-900 px-3 py-2 text-sm text-zinc-300 hover:border-violet-400/50">${esc(t('glossary.apply'))}</button>
-          <button id="history" type="button" class="shrink-0 rounded-xl border border-white/10 bg-ink-900 px-3 py-2 text-sm text-zinc-300 hover:border-violet-400/50">${esc(t('call.history'))}</button>
-          <button id="edit-toggle" type="button" ${pending ? 'hidden' : ''} aria-pressed="false" class="shrink-0 rounded-xl border border-white/10 bg-ink-900 px-4 py-2 text-sm text-zinc-300 hover:border-violet-400/50">✎ ${esc(t('call.edit'))}</button>
+          <button id="assign" type="button" class="shrink-0 whitespace-nowrap rounded-xl border border-white/10 bg-ink-900 px-3 py-2 text-sm text-zinc-300 hover:border-violet-400/50">${esc(t('call.assign'))}</button>
+          <button id="apply-glossary" type="button" ${pending ? 'hidden' : ''} title="${esc(t('glossary.apply_hint'))}" class="shrink-0 whitespace-nowrap rounded-xl border border-white/10 bg-ink-900 px-3 py-2 text-sm text-zinc-300 hover:border-violet-400/50">${esc(t('glossary.apply'))}</button>
+          <button id="history" type="button" class="shrink-0 whitespace-nowrap rounded-xl border border-white/10 bg-ink-900 px-3 py-2 text-sm text-zinc-300 hover:border-violet-400/50">${esc(t('call.history'))}</button>
         </div>
         <div class="mt-1.5 flex min-h-4 items-center justify-between gap-3 text-xs">
-          <span id="edit-hint" hidden class="text-zinc-500">${esc(t('call.edit_hint'))}</span>
           <span id="save-status" class="ml-auto"></span>
         </div>
       </div>
@@ -213,7 +210,6 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     ro = new ResizeObserver(syncHeader)
     ro.observe(header)
     bind()
-    setEditing(editing)
     if (keepScroll) el.scrollTop = scroll
   }
 
@@ -232,7 +228,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     let n = 0
     for (const b of blocks()) {
       const p = txt(b), cur = blockData(b).text
-      if (document.activeElement === p) continue
+      if (b.hasAttribute('data-editing')) continue // editor aberto: não mexe no texto
       if (!v) { b.hidden = false; p.textContent = cur; continue }
       // busca sem acento: compara na forma "dobrada" e destaca no texto original
       const hit = fold(cur).includes(fv)
@@ -256,59 +252,140 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     $('#count').textContent = v ? t('call.matches', { n }) : ''
   }
 
-  function setEditing(on: boolean) {
-    editing = on
-    $('#blocks').classList.toggle('editing', on)
-    $('#edit-toggle').setAttribute('aria-pressed', String(on))
-    $('#edit-hint').hidden = !on
-    for (const b of blocks()) {
-      const p = txt(b)
-      if (on) {
-        p.contentEditable = 'plaintext-only'
-        if (p.contentEditable !== 'plaintext-only') p.contentEditable = 'true'
-        p.spellcheck = false
-      } else p.removeAttribute('contenteditable')
+  // ------------------------------------------------------------ edição por trecho
+  /** Trecho em edição (um por vez): o texto salvo no momento em que o editor abriu. */
+  let editor: { id: number } | null = null
+  const editorOf = (b: HTMLElement) => b.querySelector<HTMLTextAreaElement>('[data-editor] textarea')
+  const openBlock = () => (editor ? el.querySelector<HTMLElement>(`[data-block="${editor.id}"]`) : null)
+  const isDirty = (b: HTMLElement) => { const ta = editorOf(b); return !!ta && norm(ta.value) !== blockData(b).text }
+
+  function growEditor(ta: HTMLTextAreaElement) { ta.style.height = 'auto'; ta.style.height = `${ta.scrollHeight}px` }
+
+  /** Abre o editor só neste trecho; os outros continuam somente leitura. */
+  function openEditor(b: HTMLElement, draft?: string) {
+    const cur = openBlock()
+    if (cur && cur !== b) {
+      if (isDirty(cur)) { editorOf(cur)?.focus(); setStatus(t('call.finish_first'), 'busy'); return }
+      closeEditor(cur)
     }
-    try { localStorage.setItem('edit-mode', on ? '1' : '0') } catch {}
+    if (editor?.id === blockData(b).id) { editorOf(b)?.focus(); return }
+    const info = blockData(b)
+    editor = { id: info.id }
+    b.setAttribute('data-editing', '')
+    const p = txt(b)
+    p.hidden = true
+    p.insertAdjacentHTML('afterend', `<div data-editor class="mt-1">
+      <textarea rows="1" maxlength="20000" spellcheck="false" aria-label="${esc(t('call.edit_block'))}" class="${inputCls} resize-none overflow-hidden leading-relaxed"></textarea>
+      <div class="mt-2 flex flex-wrap items-center gap-2">
+        <button type="button" data-save class="${btnCls.btnPrimary} !px-3 !py-1.5">${esc(t('common.save'))}</button>
+        <button type="button" data-cancel class="${btnCls.btn} !px-3 !py-1.5">${esc(t('common.cancel'))}</button>
+        <button type="button" data-glossary title="${esc(t('call.add_glossary_hint'))}" class="${btnCls.btn} !px-3 !py-1.5 sm:ml-auto">${esc(t('call.add_glossary'))}</button>
+      </div>
+      <p class="mt-1.5 text-[11px] text-zinc-600">${esc(t('call.edit_hint'))}</p></div>`)
+    const ta = editorOf(b)!
+    ta.value = draft ?? info.text
+    growEditor(ta)
+    syncEditor(b)
+    ta.focus()
+    ta.setSelectionRange(ta.value.length, ta.value.length)
+  }
+
+  /** Habilita Salvar/Adicionar ao glossário conforme o rascunho. */
+  function syncEditor(b: HTMLElement) {
+    const ta = editorOf(b)!, info = blockData(b), v = norm(ta.value)
+    b.querySelector<HTMLButtonElement>('[data-save]')!.disabled = !v
+    // com mudança: edita e abre a regra; sem mudança num trecho já editado: regra do original → corrigido
+    b.querySelector<HTMLButtonElement>('[data-glossary]')!.disabled = !v || (v === info.text && !info.edited)
+  }
+
+  function closeEditor(b: HTMLElement) {
+    b.querySelector('[data-editor]')?.remove()
+    b.removeAttribute('data-editing')
+    txt(b).hidden = false
+    if (editor?.id === Number(b.dataset.block)) editor = null
+    if (searching()) runSearch()
+  }
+
+  async function saveEditor(b: HTMLElement) {
+    const ta = editorOf(b)
+    if (!ta) return
+    const v = norm(ta.value)
+    if (!v) return
+    if (v === blockData(b).text) { closeEditor(b); return }
+    if (await save(b, () => api.setBlockText(libraryId, blockData(b).id, v))) closeEditor(b)
+  }
+
+  function cancelEditor(b: HTMLElement) { closeEditor(b); setStatus('') }
+
+  /** "Adicionar ao glossário": salva a edição (se houver) e abre a regra já preenchida com original → corrigido. */
+  async function glossaryFromEditor(b: HTMLElement) {
+    const ta = editorOf(b)
+    if (!ta) return
+    const v = norm(ta.value), info = blockData(b)
+    let from = info.text, editId: number | null = null
+    if (v !== info.text) {
+      const r = await save(b, () => api.setBlockText(libraryId, info.id, v))
+      if (!r) return
+      editId = r.edit_id
+    } else if (info.edited) from = info.original_text
+    else return
+    const to = blockData(b).text
+    closeEditor(b)
+    await offerRule(from, to, editId, info.id)
   }
 
   function applyBlock(b: HTMLElement, info: BlockInfo) {
     const i = d.blocks.findIndex(x => x.id === info.id)
     d.blocks[i] = info
     const p = txt(b)
-    if (document.activeElement !== p) p.textContent = info.text
+    p.textContent = info.text
     b.toggleAttribute('data-edited', info.edited)
     if (info.edited) b.title = t('call.original', { text: info.original_text })
     else b.removeAttribute('title')
   }
 
-  async function save(b: HTMLElement, fn: () => Promise<BlockInfo | BlockEdit>) {
+  /** Salva (histórico/desfazer pelo mesmo caminho de sempre); devolve null se falhou. Não oferece sugestões. */
+  let lastSave: Promise<unknown> = Promise.resolve()
+  function save(b: HTMLElement, fn: () => Promise<BlockInfo | BlockEdit>): Promise<BlockEdit | null> {
     setStatus(t('call.saving'), 'busy')
-    try {
-      const r = await fn()
-      const { edit_id, suggestions, ...info } = r as BlockEdit
-      applyBlock(b, info)
-      setStatus(t('call.saved'), 'ok')
-      if (searching()) runSearch()
-      for (const s of suggestions ?? []) offer(s, edit_id, info.id)
-    } catch (e) { setStatus(t('call.save_error', { error: describeError(e) }), 'err') }
+    const run = (async () => {
+      try {
+        const r = await fn() as BlockEdit
+        const { edit_id: _e, suggestions: _s, ...info } = r
+        applyBlock(b, info)
+        setStatus(t('call.saved'), 'ok')
+        return r
+      } catch (e) { setStatus(t('call.save_error', { error: describeError(e) }), 'err'); return null }
+    })()
+    lastSave = run
+    return run
   }
 
-  /** Devolve true se iniciou um salvamento (a busca local é refeita quando ele termina). */
-  function commit(b: HTMLElement): boolean {
-    clearTimeout(timers.get(Number(b.dataset.block)))
-    const p = txt(b), text = norm(p.textContent ?? ''), cur = blockData(b).text
-    if (text === cur) return false
-    if (!text) { p.textContent = cur; return false }
-    save(b, () => api.setBlockText(libraryId, blockData(b).id, text))
+  /** Ao sair da tela/do app: o rascunho aberto com mudanças é salvo (nada digitado se perde). Falhou: fica, com o erro. */
+  async function leave(): Promise<boolean> {
+    await lastSave // um salvamento em curso (Enter/Salvar) termina antes
+    const b = openBlock()
+    if (!b || !editorOf(b)) return true
+    if (!isDirty(b)) { closeEditor(b); return true }
+    const v = norm(editorOf(b)!.value)
+    if (!v) { closeEditor(b); return true } // esvaziado: nada válido a salvar
+    const r = await save(b, () => api.setBlockText(libraryId, blockData(b).id, v))
+    if (!r) { editorOf(b)?.focus(); return false }
+    closeEditor(b)
     return true
   }
 
   async function reload(keepScroll = true) {
+    // um editor aberto sobrevive ao redesenho (ex.: trocar o falante pelo editor)
+    const ob = openBlock()
+    const keep = ob ? { id: editor!.id, draft: editorOf(ob)?.value } : null
     d = await api.callDetail(libraryId, callId)
     await loadBleed()
+    editor = null
     draw(keepScroll)
     runSearch()
+    const kb = keep && el.querySelector<HTMLElement>(`[data-block="${keep.id}"]`)
+    if (kb) openEditor(kb, keep.draft)
   }
 
   async function undo() {
@@ -495,7 +572,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     toast(t('glossary.applied', { n: real.blocks_changed }))
   }
 
-  // Sugestões de regra depois de uma edição: cartões flutuantes, sem roubar o foco da edição.
+  // Regra de glossário a partir de uma edição (só quando o usuário pede, pelo botão do editor): cartões flutuantes.
   // O padrão e a substituição são editáveis (o motor sugere só o trecho mínimo, que pode ser amplo demais).
   const panel = h('div', { id: 'suggest-panel', class: 'pointer-events-none fixed bottom-4 right-4 z-40 flex max-h-[75vh] w-[min(26rem,calc(100vw-2rem))] flex-col gap-2 overflow-y-auto' })
   document.body.appendChild(panel)
@@ -539,6 +616,17 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
       </div>`)
     Object.assign(card, { _ctx: { s, editId, blockId } })
     panel.prepend(card)
+  }
+
+  /** Abre o cartão de regra pré-preenchido: o motor sugere o trecho mínimo; sem sugestão, vale o texto inteiro. */
+  async function offerRule(from: string, to: string, editId: number | null, blockId: number) {
+    let list: BlockSuggestion[] = []
+    try { list = await api.glossarySuggestions(libraryId, blockId, from, to) } catch { /* cai no texto inteiro */ }
+    if (!list.length) {
+      list = [{ pattern: from, replacement: to, occurrences_in_call: occurrences(from, blockId), client: d.client_id != null ? { id: d.client_id, name: d.client_name ?? '' } : null }]
+    }
+    for (const s of list.slice(0, MAX_OFFERS).reverse()) offer(s, editId, blockId) // `offer` empilha no topo
+    panel.querySelector<HTMLInputElement>('[data-offer] [data-pattern]')?.focus()
   }
 
   async function createFromOffer(card: HTMLElement, scope: Scope) {
@@ -592,7 +680,6 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
 
   function bind() {
     $('#q').addEventListener('input', runSearch)
-    $('#edit-toggle').addEventListener('click', () => setEditing(!editing))
     $('#title-edit').addEventListener('click', editTitle)
     $('#history').addEventListener('click', showHistory)
     $('#assign').addEventListener('click', assign)
@@ -622,33 +709,20 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
   }
 
   // eventos delegados (sobrevivem a `draw`)
-  const onFocusIn = (e: FocusEvent) => {
-    const p = (e.target as HTMLElement).closest?.('[data-text]') as HTMLElement | null
-    if (!editing || !p || !p.querySelector('mark')) return
-    p.textContent = blockData(p.closest('[data-block]')!).text // tira o destaque da busca
-    const r = document.createRange(); r.selectNodeContents(p); r.collapse(false)
-    const s = getSelection()!; s.removeAllRanges(); s.addRange(r)
-  }
   const onInput = (e: Event) => {
-    const target = e.target as HTMLElement
-    const b = target.closest?.('[data-block]') as HTMLElement | null
-    if (!editing || !b || !target.matches('[data-text]')) return
-    setStatus(t('call.typing'), 'busy')
-    const id = Number(b.dataset.block)
-    clearTimeout(timers.get(id))
-    timers.set(id, setTimeout(() => commit(b), 1200))
-  }
-  const onFocusOut = (e: FocusEvent) => {
-    const target = e.target as HTMLElement
-    const b = target.closest?.('[data-block]') as HTMLElement | null
-    if (editing && b && target.matches('[data-text]') && !commit(b) && searching()) runSearch() // refaz o destaque removido ao focar
+    const ta = e.target as HTMLElement
+    const b = ta.closest?.('[data-editing]') as HTMLElement | null
+    if (!b || !ta.matches('textarea')) return
+    growEditor(ta as HTMLTextAreaElement)
+    syncEditor(b)
+    setStatus('')
   }
   const onKey = (e: KeyboardEvent) => {
     const target = e.target as HTMLElement
-    const p = target.closest?.('[data-text]') as HTMLElement | null
-    if (p && editing) {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); p.blur() }
-      if (e.key === 'Escape') { e.preventDefault(); p.textContent = blockData(p.closest('[data-block]')!).text; setStatus(''); p.blur() }
+    const eb = target.closest?.('[data-editing]') as HTMLElement | null
+    if (eb && target.matches('textarea')) {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); void saveEditor(eb) }
+      if (e.key === 'Escape') { e.preventDefault(); cancelEditor(eb) }
       return // não roubar teclas durante a edição
     }
     if (document.querySelector('dialog[open]')) return
@@ -658,11 +732,6 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     if (e.key === '/') { e.preventDefault(); q.focus() }
     if (e.key === 'Escape') { q.value = ''; runSearch(); q.blur() }
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') { e.preventDefault(); undo() }
-  }
-  const onPaste = (e: ClipboardEvent) => {
-    if (!editing || !(e.target as HTMLElement).closest?.('[data-text]')) return
-    e.preventDefault()
-    document.execCommand('insertText', false, norm(e.clipboardData?.getData('text/plain') ?? ''))
   }
   const onClick = (e: MouseEvent) => {
     const target = e.target as HTMLElement
@@ -675,10 +744,15 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
       else if (act === 'retry') void (job && job.state === 'failed' ? retryJob(job) : enqueueCall(libraryId, callId))
       return
     }
+    const blk = target.closest<HTMLElement>('[data-block]')
+    if (blk && target.closest('[data-edit]')) { openEditor(blk); return }
+    if (blk && target.closest('[data-save]')) { void saveEditor(blk); return }
+    if (blk && target.closest('[data-cancel]')) { cancelEditor(blk); return }
+    if (blk && target.closest('[data-glossary]')) { void glossaryFromEditor(blk); return }
     const rev = target.closest('[data-revert]')
-    if (rev) { const b = rev.closest<HTMLElement>('[data-block]')!; save(b, () => api.revertBlock(libraryId, blockData(b).id)); return }
+    if (rev) { const b = rev.closest<HTMLElement>('[data-block]')!; void save(b, () => api.revertBlock(libraryId, blockData(b).id)).then(r => { if (r) closeEditor(b) }); return }
     const sb = target.closest('[data-speaker-btn]')
-    if (sb && editing) { speakerMenu(sb.closest<HTMLElement>('[data-block]')!); return }
+    if (sb && sb.closest('[data-editing]')) { void speakerMenu(sb.closest<HTMLElement>('[data-block]')!); return }
     const anchor = target.closest<HTMLAnchorElement>('[data-anchor]')
     if (anchor) { e.preventDefault(); history.replaceState(null, '', anchor.getAttribute('href')); flash(Number(anchor.closest<HTMLElement>('[data-block]')!.dataset.block)) }
   }
@@ -689,19 +763,20 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     const bubble = b.firstElementChild as HTMLElement
     bubble.removeAttribute('data-flash'); void bubble.offsetWidth; bubble.setAttribute('data-flash', '')
   }
-  el.addEventListener('focusin', onFocusIn)
   el.addEventListener('input', onInput)
-  el.addEventListener('focusout', onFocusOut)
-  el.addEventListener('paste', onPaste)
   el.addEventListener('click', onClick)
   document.addEventListener('keydown', onKey)
-  const flushPending = () => blocks().forEach(b => { if (txt(b) === document.activeElement) commit(b) })
-  window.addEventListener('beforeunload', flushPending)
+  // recarregar/fechar a página: melhor esforço (sair da tela e fechar a janela passam por `leave`)
+  const flushOnUnload = () => {
+    const b = openBlock()
+    if (b && isDirty(b) && norm(editorOf(b)!.value)) void api.setBlockText(libraryId, blockData(b).id, norm(editorOf(b)!.value))
+  }
+  window.addEventListener('beforeunload', flushOnUnload)
 
   // fila: a faixa/estado da chamada acompanha; mudança de estado da tarefa desta chamada recarrega (versão nova, falha...)
   const jobSig = () => { const j = jobForCall(libraryId, callId); return j ? `${j.id}:${j.state}` : '' }
   let sig = jobSig()
-  const busy = () => !!document.activeElement?.closest?.('[data-text]') || !!document.querySelector('dialog[open]') || panel.contains(document.activeElement)
+  const busy = () => !!el.querySelector('[data-editing]') || !!document.querySelector('dialog[open]') || panel.contains(document.activeElement)
   const offs = [
     subscribeTx('queue', () => { const n = jobSig(); if (n !== sig) { sig = n; if (!busy()) void reload(); else paintJob() } else paintJob() }),
     subscribeTx('progress', paintJob),
@@ -716,20 +791,17 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
   return {
     refresh: () => reload(),
     busy,
+    leave,
     dispose: () => {
       offs.forEach(f => f())
-      flushPending()
       panel.remove()
       io?.disconnect()
       ro?.disconnect()
       el.style.removeProperty('--hdr')
-      el.removeEventListener('focusin', onFocusIn)
       el.removeEventListener('input', onInput)
-      el.removeEventListener('focusout', onFocusOut)
-      el.removeEventListener('paste', onPaste)
       el.removeEventListener('click', onClick)
       document.removeEventListener('keydown', onKey)
-      window.removeEventListener('beforeunload', flushPending)
+      window.removeEventListener('beforeunload', flushOnUnload)
     },
   }
 }

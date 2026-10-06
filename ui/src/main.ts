@@ -1,5 +1,6 @@
 import './styles.css'
 import { api, on, inTauri, openExternal, isBarWindow, REC_EVENTS, type FinalizeDone } from './api'
+import { emit } from '@tauri-apps/api/event'
 import { hooks, store, type View } from './store'
 import { resolveLang, setLang, t } from './i18n'
 import { esc, debounce, fmtNumber, fmtTime, toast, toastLink } from './util'
@@ -167,7 +168,15 @@ function markCurrent() {
   })
 }
 
+/** hash da tela que está desenhada (para voltar a ela se não der para sair: rascunho que falhou ao salvar) */
+let shownHash = location.hash
 async function route() {
+  if (view.leave && !(await view.leave())) {
+    history.replaceState(null, '', shownHash || '#/')
+    markCurrent()
+    return
+  }
+  shownHash = location.hash
   view.dispose?.()
   view = {}
   const el = document.getElementById('view')!
@@ -236,6 +245,12 @@ async function main() {
       if (location.hash.split('?')[0] !== href) toastLink(t('transcription.done_toast'), href, t('transcription.open_call'))
     }
     void onExternalChange()
+  })
+  // o shell pede antes de sair/esconder a janela: salva o rascunho aberto e responde (`false` = falhou, não sair)
+  await on('flush-drafts', async () => {
+    let ok = true
+    try { ok = (await view.leave?.()) ?? true } catch { ok = false }
+    await emit('drafts-flushed', ok)
   })
   await on<FinalizeDone>(REC_EVENTS.finalizeDone, finalizeToast)
   await initRecovery()

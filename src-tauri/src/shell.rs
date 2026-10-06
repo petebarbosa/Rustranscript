@@ -14,7 +14,10 @@
 //! - **Início sem janela**: `ipc::spawn_gui` define `RSTT_HIDDEN`; a janela principal (criada
 //!   invisível em `tauri.conf.json`) só é mostrada no `setup` se a variável não existir.
 //! - **Segunda abertura**: gravando → mostra a barra; senão traz a janela principal para a frente.
-use tauri::{AppHandle, Manager, RunEvent, Window, WindowEvent};
+use std::sync::mpsc;
+use std::time::Duration;
+
+use tauri::{AppHandle, Emitter, Listener, Manager, RunEvent, Window, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
 
 use crate::recording::{self, RecState};
@@ -56,13 +59,43 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
     }
 }
 
-/// Esconde a janela principal e, gravando, mostra a barra (o controle da gravação sem a janela).
-fn hide_main_keep_recording(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.hide();
+/// Pede à tela da chamada para salvar o rascunho de edição aberto (evento `flush-drafts`; a resposta vem
+/// em `drafts-flushed` com `true`/`false`). `false` = o salvamento falhou: quem chama não deve sair nem
+/// esconder, para o texto digitado não se perder. Sem resposta em 5 s (tela travada/sem rascunho) segue.
+/// Bloqueia: nunca chamar da thread de eventos.
+pub fn flush_drafts(app: &AppHandle) -> bool {
+    if app.get_webview_window("main").is_none() {
+        return true;
     }
+    let (tx, rx) = mpsc::channel::<bool>();
+    let id = app.once("drafts-flushed", move |e| {
+        let _ = tx.send(e.payload().trim() != "false");
+    });
+    if app.emit_to("main", "flush-drafts", ()).is_err() {
+        app.unlisten(id);
+        return true;
+    }
+    match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(ok) => ok,
+        Err(_) => {
+            app.unlisten(id);
+            true
+        }
+    }
+}
+
+/// Esconde a janela principal e, gravando, mostra a barra (o controle da gravação sem a janela).
+/// Antes, salva o rascunho aberto; se falhar, a janela fica visível mostrando o erro.
+fn hide_main_keep_recording(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
+        if !flush_drafts(&app) {
+            show_main(&app);
+            return;
+        }
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.hide();
+        }
         if !bar::is_visible(&app) && app.state::<RecState>().is_recording() {
             bar::show(&app);
         }

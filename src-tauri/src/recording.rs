@@ -485,7 +485,9 @@ pub fn handle_request(handle: &AppHandle, req: Request) -> Response {
 pub fn request_quit(handle: &AppHandle) {
     let rec = handle.state::<RecState>();
     if !rec.is_busy() {
-        exit_now(handle);
+        // fora da thread de eventos: `exit_now` espera a tela salvar o rascunho aberto
+        let h = handle.clone();
+        std::thread::spawn(move || exit_now(&h));
         return;
     }
     let l = lang(handle);
@@ -507,6 +509,11 @@ pub fn request_quit(handle: &AppHandle) {
 /// Encerra o gravador de forma limpa (sidecar `complete`: a gravação vira órfã recuperável se a
 /// finalização não chegar a rodar) e sai.
 pub fn exit_now(handle: &AppHandle) {
+    // um rascunho de edição aberto é salvo antes de sair; se falhar, não sai (a tela mostra o erro)
+    if !crate::shell::flush_drafts(handle) {
+        crate::shell::show_main(handle);
+        return;
+    }
     handle.state::<RecState>().quitting.store(true, Ordering::SeqCst);
     shutdown(handle);
     handle.exit(0);

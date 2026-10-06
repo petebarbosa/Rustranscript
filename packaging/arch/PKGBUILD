@@ -1,6 +1,6 @@
 # Maintainer: petebarbosa <https://github.com/petebarbosa>
 pkgname=transcriptary
-pkgver=0.3.0
+pkgver=0.3.1
 pkgrel=1
 pkgdesc='Record and transcribe your meetings locally, with speaker separation'
 arch=('x86_64')
@@ -11,7 +11,7 @@ makedepends=('cargo' 'nodejs' 'npm' 'git')
 optdepends=('xdg-utils: open links and folders from the app')
 options=('!lto' '!debug')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('b215e2177ba29f941b74c73dc6aef5ecca8461e315db981f04f6a5d3a1fb97ac')
+sha256sums=('fae7052f51b71bf059a6004261d0da8db060022fe3b271473ad426512cbea1b7')
 
 prepare() {
   cd "Transcriptary-$pkgver"

@@ -272,4 +272,46 @@ CREATE TABLE bleed_removals (
     reason         TEXT NOT NULL CHECK (reason IN ('text_and_energy', 'energy_short'))
 );
 CREATE INDEX bleed_removals_transcript ON bleed_removals(transcript_id);
+"#,
+// 5: exclusão lógica de blocos. `deleted_at` preenchido = bloco fora da tela, da busca e dos textos
+// derivados; `seq`, `text`, `original_text` e o áudio ficam como estão. O `entity` do histórico ganha
+// 'block_deleted' (old/new = o `deleted_at` de antes/depois): o SQLite não altera CHECK, então a tabela
+// é refeita (ninguém aponta para `edit_history` por FK; os ids são copiados). Os gatilhos do FTS passam a
+// indexar só blocos vivos, inclusive quando o texto de um bloco excluído muda.
+r#"
+ALTER TABLE blocks ADD COLUMN deleted_at TEXT;
+
+CREATE TABLE edit_history_new (
+    id         INTEGER PRIMARY KEY,
+    call_id    INTEGER NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
+    entity     TEXT NOT NULL CHECK (entity IN ('block_text', 'block_speaker', 'call_title', 'speaker_name', 'block_deleted')),
+    entity_id  INTEGER NOT NULL,
+    old_value  TEXT,
+    new_value  TEXT,
+    origin     TEXT NOT NULL CHECK (origin IN ('ui', 'cli', 'import')),
+    at         TEXT NOT NULL,
+    undone_at  TEXT,
+    batch_id   INTEGER,
+    batch_kind TEXT
+);
+INSERT INTO edit_history_new (id, call_id, entity, entity_id, old_value, new_value, origin, at, undone_at, batch_id, batch_kind)
+    SELECT id, call_id, entity, entity_id, old_value, new_value, origin, at, undone_at, batch_id, batch_kind FROM edit_history;
+DROP TABLE edit_history;
+ALTER TABLE edit_history_new RENAME TO edit_history;
+CREATE INDEX edit_history_call ON edit_history(call_id, id);
+CREATE INDEX edit_history_batch ON edit_history(batch_id) WHERE batch_id IS NOT NULL;
+
+DROP TRIGGER blocks_ai;
+DROP TRIGGER blocks_ad;
+DROP TRIGGER blocks_au;
+CREATE TRIGGER blocks_ai AFTER INSERT ON blocks WHEN new.deleted_at IS NULL BEGIN
+    INSERT INTO blocks_fts(rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER blocks_ad AFTER DELETE ON blocks WHEN old.deleted_at IS NULL BEGIN
+    INSERT INTO blocks_fts(blocks_fts, rowid, text) VALUES ('delete', old.id, old.text);
+END;
+CREATE TRIGGER blocks_au AFTER UPDATE OF text, deleted_at ON blocks BEGIN
+    INSERT INTO blocks_fts(blocks_fts, rowid, text) SELECT 'delete', old.id, old.text WHERE old.deleted_at IS NULL;
+    INSERT INTO blocks_fts(rowid, text) SELECT new.id, new.text WHERE new.deleted_at IS NULL;
+END;
 "#];

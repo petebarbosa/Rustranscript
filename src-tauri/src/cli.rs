@@ -268,6 +268,24 @@ enum EditCmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Exclui blocos (exclusão lógica: o texto e o áudio ficam; `rstt edit restore` traz de volta)
+    Delete {
+        call: String,
+        /// Números dos blocos como em `show`
+        #[arg(required = true, num_args = 1..)]
+        seq: Vec<i64>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Restaura blocos excluídos (os números aparecem em `deleted_blocks` do `show`)
+    Restore {
+        call: String,
+        /// Números dos blocos como em `show`
+        #[arg(required = true, num_args = 1..)]
+        seq: Vec<i64>,
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Título da chamada
     Title {
         call: String,
@@ -880,6 +898,18 @@ fn exec(app: &App, cmd: Cmd, lang: Lang, json_out: bool) -> core_lib::Result<Out
                 let (mut lib, id) = find_call(app, &call)?;
                 let b = lib.block_id_by_seq(id, seq)?;
                 let r = lib.revert_block(b, Origin::Cli, dry_run)?;
+                dry(dry_run, to_json(r)?, lib.id(), Some(id))
+            }
+            EditCmd::Delete { call, seq, dry_run } => {
+                let (mut lib, id) = find_call(app, &call)?;
+                let ids = seq.iter().map(|s| lib.block_id_by_seq(id, *s)).collect::<core_lib::Result<Vec<_>>>()?;
+                let r = lib.delete_blocks(&ids, Origin::Cli, dry_run)?;
+                dry(dry_run, to_json(r)?, lib.id(), Some(id))
+            }
+            EditCmd::Restore { call, seq, dry_run } => {
+                let (mut lib, id) = find_call(app, &call)?;
+                let ids = seq.iter().map(|s| lib.block_id_by_seq(id, *s)).collect::<core_lib::Result<Vec<_>>>()?;
+                let r = lib.restore_blocks(&ids, Origin::Cli, dry_run)?;
                 dry(dry_run, to_json(r)?, lib.id(), Some(id))
             }
             EditCmd::Title { call, title, dry_run } => {
@@ -1538,6 +1568,58 @@ mod tests {
         let ids: Vec<_> = v["models"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
         assert_eq!(ids, ["whisper", "segmentation", "embedding"]);
         assert!(v["runtime"]["state"].is_string() && v["runtime"]["runtime_version"].is_u64());
+    }
+
+    #[test]
+    fn edit_delete_and_restore_blocks() {
+        let (_tmp, app) = setup();
+        let call = "call_2026-06-01_10-00-00";
+        let seqs = |v: &Value, k: &str| v[k].as_array().unwrap().iter().map(|b| b["seq"].as_i64().unwrap()).collect::<Vec<_>>();
+
+        // simulação: mostra o que mudaria e não grava nem avisa a app
+        let (v, notify) = run(&app, &["edit", "delete", call, "1", "3", "--dry-run"]).unwrap();
+        assert!(notify.is_none());
+        assert_eq!((v["dry_run"].as_bool(), seqs(&v["result"], "changed")), (Some(true), vec![1, 3]));
+        assert_eq!(seqs(&run(&app, &["show", call]).unwrap().0, "blocks"), [1, 2, 3]);
+
+        let (v, notify) = run(&app, &["edit", "delete", call, "1", "3"]).unwrap();
+        assert_eq!((seqs(&v, "changed"), seqs(&v, "unchanged")), (vec![1, 3], vec![]));
+        assert!(v["changed"][0]["deleted_at"].is_string());
+        assert_eq!(notify.unwrap()["event"], "changed");
+        let (d, _) = run(&app, &["show", call]).unwrap();
+        assert_eq!((seqs(&d, "blocks"), seqs(&d, "deleted_blocks")), (vec![2], vec![1, 3]));
+        assert_eq!(d["words"], 1);
+        // o texto corrido não traz os excluídos
+        let argv = ["rstt", "show", call, "--text"];
+        let Output::Text(t) = exec(&app, Cli::try_parse_from(argv).unwrap().cmd, Lang::EnUs, false).unwrap() else { panic!() };
+        assert!(t.contains("#2 ") && !t.contains("#1 ") && !t.contains("Gate Wei"), "{t}");
+        assert!(run(&app, &["search", "voltou"]).unwrap().0.as_array().unwrap().is_empty());
+        // o seq dos que sobraram não muda e o excluído não se edita
+        assert!(run(&app, &["edit", "block", call, "1", "x"]).is_err_and(|e| e.code() == "conflict"));
+        assert!(run(&app, &["edit", "delete", call, "9"]).is_err_and(|e| e.code() == "not_found"));
+        assert!(Cli::try_parse_from(["rstt", "edit", "delete", call]).is_err(), "sem número de bloco");
+
+        // repetir é idempotente; o histórico mostra a exclusão
+        let (v, _) = run(&app, &["edit", "delete", call, "1"]).unwrap();
+        assert_eq!((seqs(&v, "changed"), seqs(&v, "unchanged")), (vec![], vec![1]));
+        let (h, _) = run(&app, &["history", call]).unwrap();
+        assert_eq!((h[0]["entity"].as_str(), h[0]["batch_kind"].as_str(), h[0]["batch_size"].as_i64()), (Some("block_deleted"), Some("delete"), Some(2)));
+
+        let (v, _) = run(&app, &["edit", "restore", call, "3", "--dry-run"]).unwrap();
+        assert_eq!(v["dry_run"], true);
+        assert_eq!(seqs(&run(&app, &["show", call]).unwrap().0, "blocks"), [2]);
+        let (v, notify) = run(&app, &["edit", "restore", call, "1", "3"]).unwrap();
+        assert_eq!(seqs(&v, "changed"), [1, 3]);
+        assert_eq!(notify.unwrap()["event"], "changed");
+        let (d, _) = run(&app, &["show", call]).unwrap();
+        assert_eq!((seqs(&d, "blocks"), seqs(&d, "deleted_blocks")), (vec![1, 2, 3], vec![]));
+        assert_eq!(run(&app, &["search", "voltou"]).unwrap().0.as_array().unwrap().len(), 1);
+
+        // `undo` desfaz o lote de exclusão inteiro
+        run(&app, &["edit", "delete", call, "2", "3"]).unwrap();
+        let (u, _) = run(&app, &["undo", call]).unwrap();
+        assert_eq!((u["entity"].as_str(), u["batch_size"].as_i64()), (Some("block_deleted"), Some(2)));
+        assert_eq!(seqs(&run(&app, &["show", call]).unwrap().0, "blocks"), [1, 2, 3]);
     }
 
     #[test]

@@ -259,7 +259,7 @@ pub(crate) fn apply_in_tx(tx: &Connection, call_id: i64, transcript_id: i64, eng
         return Ok(report);
     }
     let blocks: Vec<(i64, i64, String)> = {
-        let mut stmt = tx.prepare("SELECT id, seq, text FROM blocks WHERE transcript_id = ?1 ORDER BY seq")?;
+        let mut stmt = tx.prepare("SELECT id, seq, text FROM blocks WHERE transcript_id = ?1 AND deleted_at IS NULL ORDER BY seq")?;
         stmt.query_map([transcript_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?
     };
     let mut batch = None;
@@ -405,7 +405,7 @@ impl App {
             None => None,
         };
         let others: Vec<String> = {
-            let mut stmt = lib.conn.prepare("SELECT text FROM blocks WHERE transcript_id = ?1 AND id != ?2")?;
+            let mut stmt = lib.conn.prepare("SELECT text FROM blocks WHERE transcript_id = ?1 AND id != ?2 AND deleted_at IS NULL")?;
             stmt.query_map(params![transcript_id, block_id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
         };
         Ok(found

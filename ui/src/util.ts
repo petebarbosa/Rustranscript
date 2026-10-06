@@ -83,6 +83,16 @@ export function toastLink(msg: string, href: string, label: string, ms = 9000) {
   ;(box as any)._t = setTimeout(() => (box.innerHTML = ''), ms)
 }
 
+/** Toast com um botão de ação (ex.: "Desfazer"). Mesmo esquema do `toastLink`: o cartão reativa o mouse só para si. */
+export function toastAction(msg: string, label: string, onClick: () => void, ms = 8000) {
+  const box = document.getElementById('toast')!
+  box.innerHTML = `<div class="pointer-events-auto flex items-center gap-3 rounded-xl border border-violet-400/40 bg-ink-800/95 px-4 py-2 text-sm text-zinc-100 shadow-xl">
+    <span>${esc(msg)}</span><button type="button" class="whitespace-nowrap rounded-lg px-1.5 font-medium text-violet-300 hover:text-violet-200 hover:underline focus-visible:outline focus-visible:outline-1 focus-visible:outline-violet-400/60">${esc(label)}</button></div>`
+  clearTimeout((box as any)._t)
+  box.querySelector('button')!.addEventListener('click', () => { clearTimeout((box as any)._t); box.innerHTML = ''; onClick() })
+  ;(box as any)._t = setTimeout(() => (box.innerHTML = ''), ms)
+}
+
 export const debounce = <A extends unknown[]>(fn: (...a: A) => void, ms: number) => {
   let id: ReturnType<typeof setTimeout> | undefined
   return (...a: A) => { clearTimeout(id); id = setTimeout(() => fn(...a), ms) }

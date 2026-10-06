@@ -30,7 +30,9 @@ Every write is reversible and logged, so edit freely, but always in this order:
 
 Other edits, all with `--dry-run`: `edit title <key> "<title>"`, `edit speaker <key> <label> "<name>"`, `edit block-speaker <key> <seq> <speaker>`, `edit revert <key> <seq>`.
 
-`rstt history <key>` lists changes; `rstt undo <key> --dry-run`, then `rstt undo <key>`, reverts the most recent one (a glossary apply is one change and reverts as a whole).
+Deleting blocks is soft: `rstt edit delete <key> <seq>... --dry-run`, then without `--dry-run`. The blocks vanish from `show`, `show --text` and `search`, and the other blocks keep their `seq`; the text and audio stay. The result lists `changed` and `unchanged` (already deleted: no error, nothing logged). Deleted blocks appear with their `seq` in `deleted_blocks` of `rstt show <key>` (JSON); `rstt edit restore <key> <seq>...` (also with `--dry-run`) brings them back. A deleted block cannot be edited (`conflict`) until restored.
+
+`rstt history <key>` lists changes; `rstt undo <key> --dry-run`, then `rstt undo <key>`, reverts the most recent one (a glossary apply, or one `edit delete`/`edit restore` call, is one change and reverts as a whole).
 
 ## Glossary
 

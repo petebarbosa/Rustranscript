@@ -261,3 +261,232 @@ fn libraries_are_reopened_from_a_copied_folder() {
     let lib = other.add_library("Cópia", &copy).unwrap();
     assert_eq!(other.open_library(lib.id).unwrap().calls(ClientFilter::Any).unwrap().len(), 2);
 }
+
+// ------------------------------------------------------------------ exclusão lógica de blocos
+
+/// Chamada sintética com 5 blocos (falantes alternados, nada se junta). Devolve (app, biblioteca, chamada, blocos por seq).
+fn five_blocks() -> (tempfile::TempDir, App, core_lib::Library, i64, Vec<i64>) {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("call_2026-07-01_09-00-00_sintetica.txt"),
+        "[00:00:05] Outros: abertura da reuniao\n[00:00:30] Eu: planilha trimestral pronta\n[00:01:00] Outros: orcamento aprovado ontem\n\
+         [00:01:30] Eu: proximos passos combinados\n[00:02:00] Outros: encerramento cordial\n",
+    )
+    .unwrap();
+    let app = App::open(&tmp.path().join("data")).unwrap();
+    import_all(&app, &src, &ImportOptions { convert_audio: false, ..Default::default() });
+    let lib = app.open_library(app.inbox_id().unwrap()).unwrap();
+    let call = lib.call_id_by_key("call_2026-07-01_09-00-00").unwrap().unwrap();
+    let ids = (1..=5).map(|s| lib.block_id_by_seq(call, s).unwrap()).collect();
+    (tmp, app, lib, call, ids)
+}
+
+fn seqs(lib: &core_lib::Library, call: i64) -> Vec<i64> {
+    lib.call_detail(call, None).unwrap().blocks.iter().map(|b| b.seq).collect()
+}
+
+fn found(app: &App, q: &str) -> usize {
+    search::search(app, q, 10).unwrap().iter().filter(|h| h.block_id.is_some()).count()
+}
+
+#[test]
+fn delete_and_restore_round_trip_keeps_seq_text_and_search() {
+    let (_tmp, app, mut lib, call, ids) = five_blocks();
+    let before = lib.call_detail(call, None).unwrap();
+    assert_eq!(seqs(&lib, call), [1, 2, 3, 4, 5]);
+    assert_eq!(found(&app, "orcamento"), 1);
+
+    let r = lib.delete_blocks(&[ids[2], ids[3]], Origin::Ui, false).unwrap();
+    assert_eq!((r.changed.len(), r.unchanged.len()), (2, 0));
+    assert!(r.changed.iter().all(|b| b.deleted_at.is_some()));
+    // sai da tela e da busca, os outros mantêm o `seq`
+    let d = lib.call_detail(call, None).unwrap();
+    assert_eq!(d.blocks.iter().map(|b| b.seq).collect::<Vec<_>>(), [1, 2, 5]);
+    assert_eq!(d.deleted_blocks.iter().map(|b| b.seq).collect::<Vec<_>>(), [3, 4]);
+    assert_eq!(lib.block_id_by_seq(call, 5).unwrap(), ids[4]);
+    assert_eq!(found(&app, "orcamento"), 0);
+    assert_eq!(found(&app, "proximos"), 0);
+    assert_eq!(found(&app, "planilha"), 1, "os vivos continuam acháveis");
+    // contagens e prévia só dos vivos
+    assert!(d.summary.words < before.summary.words);
+    assert_eq!(d.summary.words, 3 + 3 + 2);
+    // o texto e o original ficam no banco
+    let b = lib.block(ids[2]).unwrap();
+    assert_eq!((b.text.as_str(), b.original_text.as_str(), b.seq), ("orcamento aprovado ontem", "orcamento aprovado ontem", 3));
+
+    let r = lib.restore_blocks(&[ids[2], ids[3]], Origin::Ui, false).unwrap();
+    assert_eq!(r.changed.len(), 2);
+    assert!(r.changed.iter().all(|b| b.deleted_at.is_none()));
+    let d = lib.call_detail(call, None).unwrap();
+    assert_eq!(d.blocks.iter().map(|b| b.seq).collect::<Vec<_>>(), [1, 2, 3, 4, 5]);
+    assert!(d.deleted_blocks.is_empty());
+    assert_eq!(d.summary.words, before.summary.words);
+    assert_eq!(found(&app, "orcamento"), 1, "volta para a busca");
+    assert_eq!(found(&app, "proximos"), 1);
+}
+
+#[test]
+fn delete_records_one_batch_in_history_and_is_idempotent() {
+    let (_tmp, _app, mut lib, call, ids) = five_blocks();
+    lib.delete_blocks(&[ids[0], ids[1], ids[0]], Origin::Cli, false).unwrap();
+    let h = lib.history(Some(call), 10).unwrap();
+    assert_eq!(h.len(), 2, "id repetido conta uma vez");
+    assert!(h.iter().all(|e| e.entity == "block_deleted" && e.origin == "cli" && e.batch_kind.as_deref() == Some("delete") && e.batch_size == Some(2)));
+    assert!(h.iter().all(|e| e.old_value.is_none() && e.new_value.is_some()));
+    assert_eq!(h[0].batch_id, h[1].batch_id);
+
+    // de novo: nada muda, nada novo no histórico
+    let again = lib.delete_blocks(&[ids[0], ids[2]], Origin::Cli, false).unwrap();
+    assert_eq!((again.changed.len(), again.unchanged.len()), (1, 1));
+    assert_eq!(again.unchanged[0].id, ids[0]);
+    assert_eq!(lib.history(Some(call), 10).unwrap().len(), 3);
+    let none = lib.restore_blocks(&[ids[4]], Origin::Cli, false).unwrap();
+    assert_eq!((none.changed.len(), none.unchanged.len()), (0, 1));
+    assert_eq!(lib.history(Some(call), 10).unwrap().len(), 3);
+
+    lib.restore_blocks(&[ids[0]], Origin::Ui, false).unwrap();
+    let h = lib.history(Some(call), 10).unwrap();
+    assert_eq!((h[0].entity.as_str(), h[0].batch_kind.as_deref()), ("block_deleted", Some("restore")));
+    assert!(h[0].old_value.is_some() && h[0].new_value.is_none());
+
+    assert!(lib.delete_blocks(&[], Origin::Cli, false).is_err_and(|e| e.code() == "invalid"));
+    // um id inexistente desfaz o conjunto inteiro
+    assert!(lib.delete_blocks(&[ids[3], 9999], Origin::Cli, false).is_err_and(|e| e.code() == "not_found"));
+    assert!(lib.block(ids[3]).unwrap().deleted_at.is_none());
+}
+
+#[test]
+fn dry_run_delete_changes_nothing() {
+    let (_tmp, app, mut lib, call, ids) = five_blocks();
+    let r = lib.delete_blocks(&[ids[1], ids[2]], Origin::Cli, true).unwrap();
+    assert_eq!(r.changed.len(), 2, "a prévia mostra o que mudaria");
+    assert_eq!(seqs(&lib, call), [1, 2, 3, 4, 5]);
+    assert!(lib.history(Some(call), 10).unwrap().is_empty());
+    assert_eq!(found(&app, "orcamento"), 1);
+    lib.delete_blocks(&[ids[1]], Origin::Cli, false).unwrap();
+    let r = lib.restore_blocks(&[ids[1]], Origin::Cli, true).unwrap();
+    assert_eq!(r.changed.len(), 1);
+    assert!(lib.block(ids[1]).unwrap().deleted_at.is_some());
+    assert_eq!(lib.history(Some(call), 10).unwrap().len(), 1);
+}
+
+#[test]
+fn undo_reverts_a_delete_batch_and_deleted_blocks_cannot_be_edited() {
+    let (_tmp, app, mut lib, call, ids) = five_blocks();
+    lib.delete_blocks(&[ids[0], ids[1], ids[2]], Origin::Ui, false).unwrap();
+    assert_eq!(seqs(&lib, call), [4, 5]);
+    // editar ou reatribuir bloco excluído é conflito; a mensagem manda restaurar
+    assert!(lib.set_block_text(ids[1], "novo texto", Origin::Ui, false).is_err_and(|e| e.code() == "conflict"));
+    assert!(lib.revert_block(ids[1], Origin::Ui, false).is_err_and(|e| e.code() == "conflict"));
+    let eu = lib.find_speaker(call, "Eu").unwrap();
+    assert!(lib.set_block_speaker(ids[0], eu.id, Origin::Ui, false).is_err_and(|e| e.code() == "conflict"));
+
+    let e = lib.undo(Some(call), false).unwrap().unwrap();
+    assert_eq!((e.entity.as_str(), e.batch_size), ("block_deleted", Some(3)));
+    assert_eq!(seqs(&lib, call), [1, 2, 3, 4, 5]);
+    assert_eq!(found(&app, "abertura"), 1);
+    // desfazer o restore exclui de novo
+    lib.restore_blocks(&[ids[0]], Origin::Ui, false).unwrap();
+    lib.delete_blocks(&[ids[0]], Origin::Ui, false).unwrap();
+    lib.undo(Some(call), false).unwrap().unwrap();
+    assert_eq!(seqs(&lib, call), [1, 2, 3, 4, 5]);
+    assert_eq!(found(&app, "abertura"), 1);
+}
+
+#[test]
+fn glossary_and_suggestions_ignore_deleted_blocks() {
+    let (_tmp, app, mut lib, call, ids) = five_blocks();
+    app.add_global_rule(
+        &core_lib::rules::RuleInput { kind: core_lib::model::RuleKind::Replace, pattern: "reuniao".into(), replacement: Some("reunião".into()), case_sensitive: false },
+        None,
+    )
+    .unwrap();
+    lib.delete_blocks(&[ids[0]], Origin::Cli, false).unwrap();
+    let rep = app.apply_glossary(&mut lib, call, None, Origin::Cli, false).unwrap();
+    assert_eq!(rep.blocks_changed, 0, "o bloco excluído não é reescrito");
+    assert_eq!(lib.block(ids[0]).unwrap().text, "abertura da reuniao");
+    // mudar o texto por baixo (undo de edição antiga) não pode reindexar um bloco excluído
+    assert_eq!(found(&app, "reuniao"), 0);
+    lib.restore_blocks(&[ids[0]], Origin::Cli, false).unwrap();
+    assert_eq!(found(&app, "reuniao"), 1);
+}
+
+#[test]
+fn moving_a_call_keeps_deleted_blocks_and_their_history() {
+    let (tmp, app, mut lib, call, ids) = five_blocks();
+    lib.delete_blocks(&[ids[2]], Origin::Ui, false).unwrap();
+    let inbox_id = lib.id();
+    drop(lib);
+    let company = app.add_library("Empresa Sintetica", &tmp.path().join("Empresa")).unwrap();
+    let (lib_id, new_call) = transfer::assign(&app, inbox_id, call, company.id, None).unwrap();
+    let mut lib = app.open_library(lib_id).unwrap();
+    let d = lib.call_detail(new_call, None).unwrap();
+    assert_eq!(d.blocks.iter().map(|b| b.seq).collect::<Vec<_>>(), [1, 2, 4, 5]);
+    assert_eq!(d.deleted_blocks.iter().map(|b| b.seq).collect::<Vec<_>>(), [3]);
+    assert_eq!(found(&app, "orcamento"), 0);
+    let h = lib.history(Some(new_call), 10).unwrap();
+    assert_eq!((h.len(), h[0].entity.as_str()), (1, "block_deleted"));
+    assert_eq!(h[0].entity_id, d.deleted_blocks[0].id, "o id do histórico segue o bloco novo");
+    lib.undo(Some(new_call), false).unwrap().unwrap();
+    assert_eq!(found(&app, "orcamento"), 1);
+}
+
+/// Biblioteca criada na versão anterior do esquema (4), com dados, é aberta e migrada sem perder nada.
+#[test]
+fn migration_from_previous_schema_version_preserves_data_and_adds_soft_delete() {
+    use core_lib::{db, schema};
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("library.db");
+    let previous = &schema::LIBRARY_MIGRATIONS[..4];
+    {
+        let conn = db::open(&path, previous).unwrap();
+        assert_eq!(conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), 4);
+        conn.execute_batch(
+            "INSERT INTO calls (id, key, started_at, created_at) VALUES (1, 'call_2026-01-01_10-00-00', '2026-01-01T10:00:00', 't');
+             INSERT INTO transcripts (id, call_id, version, created_at, is_active) VALUES (1, 1, 1, 't', 1);
+             INSERT INTO speakers (id, call_id, track, label) VALUES (1, 1, 'sys', 'Pessoa 1');
+             INSERT INTO blocks (id, transcript_id, seq, t_start, t_end, speaker_id, original_text, text) VALUES
+                (1, 1, 1, 0, 1, 1, 'primeiro trecho sintetico', 'primeiro trecho sintetico'),
+                (2, 1, 2, 1, 2, 1, 'segundo trecho sintetico', 'segundo trecho editado');
+             INSERT INTO edit_history (id, call_id, entity, entity_id, old_value, new_value, origin, at, batch_id, batch_kind)
+                VALUES (7, 1, 'block_text', 2, 'segundo trecho sintetico', 'segundo trecho editado', 'ui', 't', 3, 'glossary');",
+        )
+        .unwrap();
+        // a CHECK antiga recusa a entidade nova
+        assert!(conn.execute("INSERT INTO edit_history (call_id, entity, entity_id, origin, at) VALUES (1, 'block_deleted', 1, 'ui', 't')", []).is_err());
+    }
+    let conn = db::open(&path, schema::LIBRARY_MIGRATIONS).unwrap();
+    assert_eq!(conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), schema::LIBRARY_MIGRATIONS.len() as i64);
+    assert!(schema::LIBRARY_MIGRATIONS.len() >= 5);
+    // blocos intactos e vivos; a coluna nova existe
+    let rows: Vec<(i64, String, Option<String>)> = conn
+        .prepare("SELECT seq, text, deleted_at FROM blocks ORDER BY seq")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(rows, [(1, "primeiro trecho sintetico".into(), None), (2, "segundo trecho editado".into(), None)]);
+    // histórico copiado com os mesmos ids, lote e tipo; índices refeitos
+    let h: (i64, String, i64, String) =
+        conn.query_row("SELECT id, entity, batch_id, batch_kind FROM edit_history", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
+    assert_eq!(h, (7, "block_text".into(), 3, "glossary".into()));
+    let idx: i64 = conn.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name IN ('edit_history_call', 'edit_history_batch')", [], |r| r.get(0)).unwrap();
+    assert_eq!(idx, 2);
+    // a CHECK nova aceita; as outras continuam valendo
+    conn.execute("INSERT INTO edit_history (call_id, entity, entity_id, origin, at) VALUES (1, 'block_deleted', 1, 'ui', 't')", []).unwrap();
+    assert!(conn.execute("INSERT INTO edit_history (call_id, entity, entity_id, origin, at) VALUES (1, 'outra_coisa', 1, 'ui', 't')", []).is_err());
+    // FTS: o que existia continua achável; excluir tira, restaurar devolve, mexer no texto de excluído não reindexa
+    let hits = |q: &str| -> i64 { conn.query_row("SELECT count(*) FROM blocks_fts WHERE blocks_fts MATCH ?1", [q], |r| r.get(0)).unwrap() };
+    assert_eq!((hits("primeiro"), hits("editado"), hits("sintetico")), (1, 1, 1));
+    conn.execute("UPDATE blocks SET deleted_at = 't' WHERE id = 1", []).unwrap();
+    assert_eq!(hits("primeiro"), 0);
+    conn.execute("UPDATE blocks SET text = 'trecho reescrito' WHERE id = 1", []).unwrap();
+    assert_eq!(hits("reescrito"), 0);
+    conn.execute("UPDATE blocks SET deleted_at = NULL WHERE id = 1", []).unwrap();
+    assert_eq!((hits("reescrito"), hits("primeiro")), (1, 0));
+    conn.execute("DELETE FROM blocks WHERE id = 2", []).unwrap();
+    assert_eq!(hits("editado"), 0);
+}

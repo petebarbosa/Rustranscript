@@ -3,11 +3,11 @@
 import { mockIPC } from '@tauri-apps/api/mocks'
 import { emit } from '@tauri-apps/api/event'
 import { TRANSCRIPTION_DEFAULTS } from './api'
-import type { ApplyReport, BleedRemoval, BlockChange, BlockInfo, BlockSuggestion, CallDetail, ClientInfo, DeviceInfo, GlossaryImportEntry, HistoryEntry, Hit, JobInfo, JobKind, JobOptions, JobProgress, JobStage, LibraryInfo, LevelsEvent, ModelStatus, PauseReason, QueueStatus, Orphan, RecordingInfo, RecordStatus, Rule, SpeakerInfo, StreamChoice, StreamLevel, StreamStatus } from './api'
+import type { ApplyReport, BleedRemoval, BlockChange, BlockInfo, BlocksChange, BlockSuggestion, CallDetail, ClientInfo, DeviceInfo, GlossaryImportEntry, HistoryEntry, Hit, JobInfo, JobKind, JobOptions, JobProgress, JobStage, LibraryInfo, LevelsEvent, ModelStatus, PauseReason, QueueStatus, Orphan, RecordingInfo, RecordStatus, Rule, SpeakerInfo, StreamChoice, StreamLevel, StreamStatus } from './api'
 
 type Args = Record<string, any>
 
-interface Call extends Omit<CallDetail, 'library_name' | 'words' | 'preview' | 'edited_blocks' | 'transcript_id'> {
+interface Call extends Omit<CallDetail, 'library_name' | 'words' | 'preview' | 'edited_blocks' | 'transcript_id' | 'deleted_blocks'> {
   /** null = chamada recém-gravada, sem transcrição (RECORDING_CONTRACT §5) */
   transcript_id: number | null
   /** blocos/falantes das versões inativas, por id de transcrição (trocados por set_active_transcript) */
@@ -34,7 +34,7 @@ function mkCall(library_id: number, id: number, key: string, title: string, clie
     return s.id
   }
   const blocks: BlockInfo[] = lines.map(([t, spk, text], i) => ({
-    id: ++seq, seq: i + 1, t_start: t, t_end: t, speaker_id: sid(spk), text, original_text: text, edited: false,
+    id: ++seq, seq: i + 1, t_start: t, t_end: t, speaker_id: sid(spk), text, original_text: text, edited: false, deleted_at: null,
   }))
   const date = key.slice(5, 15), time = key.slice(16).replace(/-/g, ':')
   return {
@@ -114,20 +114,39 @@ function findBlock(library_id: number, block_id: number) {
   }
   throw { code: 'not_found', detail: `block ${block_id}` }
 }
+/** blocos vivos (os excluídos ficam em `c.blocks` com `deleted_at`, como no banco) */
+const live = (c: Call) => c.blocks.filter(b => !b.deleted_at)
 function summary(c: Call) {
-  const words = c.blocks.reduce((n, b) => n + b.text.split(/\s+/).filter(Boolean).length, 0)
-  const preview = c.blocks.slice(0, 3).map(b => b.text).join(' ').slice(0, 200)
+  const words = live(c).reduce((n, b) => n + b.text.split(/\s+/).filter(Boolean).length, 0)
+  const preview = live(c).slice(0, 3).map(b => b.text).join(' ').slice(0, 200)
   const client = clients.find(x => x.id === c.client_id)
   const { speakers: _s, blocks: _b, chapters: _c, transcripts: _t, audio: _a, other: _o, ...rest } = c
-  return { ...rest, client_name: client?.name ?? null, words, preview, edited_blocks: c.blocks.filter(b => b.edited).length }
+  return { ...rest, client_name: client?.name ?? null, words, preview, edited_blocks: live(c).filter(b => b.edited).length }
 }
-function record(library_id: number, call_id: number, entity: HistoryEntry['entity'], entity_id: number, old_value: string | null, new_value: string | null, batch?: { id: number; size: number }) {
+function record(library_id: number, call_id: number, entity: HistoryEntry['entity'], entity_id: number, old_value: string | null, new_value: string | null, batch?: { id: number; size: number; kind?: 'glossary' | 'delete' | 'restore' }) {
   const id = ++seq
   history.push({
     library_id, id, call_id, entity, entity_id, old_value, new_value, origin: 'ui', at: now(), undone_at: null,
-    batch_id: batch?.id ?? null, batch_kind: batch ? 'glossary' : null, batch_size: batch?.size ?? null,
+    batch_id: batch?.id ?? null, batch_kind: batch ? batch.kind ?? 'glossary' : null, batch_size: batch?.size ?? null,
   })
   return id
+}
+/** delete_blocks/restore_blocks: lote único no histórico; idempotente (já no estado pedido = `unchanged`) */
+function setDeleted(a: Args, del: boolean): BlocksChange {
+  const ids = [...new Set<number>(a.blockIds)]
+  if (!ids.length) throw { code: 'invalid', detail: 'no blocks given' }
+  const found = ids.map(id => findBlock(a.libraryId, id)) // um id ruim desfaz tudo (nada foi gravado ainda)
+  const todo = found.filter(({ b }) => !!b.deleted_at !== del)
+  const batch = todo.length ? { id: ++seq, size: todo.length, kind: del ? 'delete' as const : 'restore' as const } : undefined
+  const out: BlocksChange = { changed: [], unchanged: [] }
+  for (const { c, b } of found) {
+    if (!!b.deleted_at === del) { out.unchanged.push({ ...b }); continue }
+    const old = b.deleted_at
+    b.deleted_at = del ? now() : null
+    record(a.libraryId, c.id, 'block_deleted', b.id, old, b.deleted_at, batch)
+    out.changed.push({ ...b })
+  }
+  return out
 }
 const norm = (s: string) => s.replace(/\s+/g, ' ').trim()
 const fold = (s: string) => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase()
@@ -154,7 +173,7 @@ const handlers: Record<string, (a: Args) => unknown> = {
     const c = findCall(a.libraryId, a.callId)
     const { other: _o, ...full } = c
     if (a.transcriptId != null && c.transcript_id == null) throw { code: 'not_found', detail: `transcript ${a.transcriptId}` }
-    return { ...full, ...summary(c), library_name: lib(c.library_id).name, blocks: c.blocks.map(b => ({ ...b })), speakers: c.speakers.map(s => ({ ...s })) }
+    return { ...full, ...summary(c), library_name: lib(c.library_id).name, blocks: live(c).map(b => ({ ...b })), deleted_blocks: c.blocks.filter(b => b.deleted_at).map(b => ({ ...b })), speakers: c.speakers.map(s => ({ ...s })) }
   },
   set_block_text: a => {
     const { c, b } = findBlock(a.libraryId, a.blockId)
@@ -165,6 +184,8 @@ const handlers: Record<string, (a: Args) => unknown> = {
     if (t !== b.text) { edit_id = record(a.libraryId, c.id, 'block_text', b.id, b.text, t); b.text = t; b.edited = t !== b.original_text }
     return { ...b, edit_id, suggestions: edit_id ? suggest(a.libraryId, c, b.id, old, t) : [] }
   },
+  delete_blocks: a => setDeleted(a, true),
+  restore_blocks: a => setDeleted(a, false),
   revert_block: a => { const { b } = findBlock(a.libraryId, a.blockId); return handlers.set_block_text({ ...a, text: b.original_text }) },
   set_title: a => {
     const c = findCall(a.libraryId, a.callId)
@@ -211,6 +232,7 @@ const handlers: Record<string, (a: Args) => unknown> = {
       if (e.entity === 'call_title') c.title = e.old_value ?? ''
       if (e.entity === 'speaker_name') c.speakers.find(s => s.id === e.entity_id)!.name = e.old_value
       if (e.entity === 'block_speaker') c.blocks.find(b => b.id === e.entity_id)!.speaker_id = Number(e.old_value)
+      if (e.entity === 'block_deleted') c.blocks.find(b => b.id === e.entity_id)!.deleted_at = e.old_value
       e.undone_at = now()
     }
     return h
@@ -223,7 +245,7 @@ const handlers: Record<string, (a: Args) => unknown> = {
     const out = []
     for (const c of calls) {
       if (hit(c.title)) out.push({ library_id: c.library_id, call_id: c.id, call_key: c.key, call_title: c.title, started_at: c.started_at, block_id: null, t_start: null, snippet: mark(c.title), rank: -2 })
-      for (const b of c.blocks) if (hit(b.text)) out.push({ library_id: c.library_id, call_id: c.id, call_key: c.key, call_title: c.title, started_at: c.started_at, block_id: b.id, t_start: b.t_start, snippet: mark(b.text), rank: -1 })
+      for (const b of live(c)) if (hit(b.text)) out.push({ library_id: c.library_id, call_id: c.id, call_key: c.key, call_title: c.title, started_at: c.started_at, block_id: b.id, t_start: b.t_start, snippet: mark(b.text), rank: -1 })
     }
     return out.slice(0, a.limit)
   },
@@ -358,7 +380,7 @@ function suggest(libraryId: number, c: Call, blockId: number, oldText: string, n
   const client = clients.find(k => k.id === c.client_id)
   return [{
     pattern, replacement,
-    occurrences_in_call: c.blocks.filter(b => b.id !== blockId && re.test(b.text)).length,
+    occurrences_in_call: live(c).filter(b => b.id !== blockId && re.test(b.text)).length,
     client: client ? { id: client.id, name: client.name } : null,
   }]
 }
@@ -391,7 +413,7 @@ Object.assign(handlers, {
     if (c.transcript_id == null) throw { code: 'not_found', detail: 'transcript' }
     const eff = merged(a.libraryId, c.client_id)
     const changes: BlockChange[] = []
-    for (const b of c.blocks) {
+    for (const b of live(c)) {
       const r = applyRules(b.text, eff)
       if (r.text !== b.text) changes.push({ block_id: b.id, seq: b.seq, before: b.text, after: r.text, rules: r.hits })
     }
@@ -835,7 +857,7 @@ function commitVersion(c: Call, j: JobInfo) {
   // sem o filtro de eco, esses trechos do microfone ficam no texto
   if (!bleedOn) removals.forEach(r => lines.push({ t: r.t_start, spk: speakers[0], text: r.text[0].toUpperCase() + r.text.slice(1) + '.', echo: true }))
   lines.sort((a, b) => a.t - b.t)
-  const blocks: BlockInfo[] = lines.map((l, i) => ({ id: ++seq, seq: i + 1, t_start: l.t, t_end: l.t + 20, speaker_id: l.spk.id, text: l.text, original_text: l.text, edited: false }))
+  const blocks: BlockInfo[] = lines.map((l, i) => ({ id: ++seq, seq: i + 1, t_start: l.t, t_end: l.t + 20, speaker_id: l.spk.id, text: l.text, original_text: l.text, edited: false, deleted_at: null }))
   const id = ++seq
   bleedBy.set(id, bleedOn ? removals : [])
   if (prev) c.other = { ...(c.other ?? {}), [c.transcript_id!]: prev }

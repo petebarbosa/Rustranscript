@@ -1,9 +1,9 @@
 import { api, toError, type BleedRemoval, type BlockEdit, type BlockInfo, type BlockSuggestion, type CallDetail, type Hit, type HistoryEntry, type JobInfo, type Scope, type SpeakerInfo } from '../api'
 import { t } from '../i18n'
 import { hooks, libName, meName, store, type View } from '../store'
-import { assignDialog, btnCls, describeError, describeGlossaryError, field, form, inputCls, renameDialog } from '../dialogs'
+import { assignDialog, btnCls, confirmDialog, describeError, describeGlossaryError, field, form, inputCls, renameDialog } from '../dialogs'
 import { cancelJob, enqueueCall, isReady, jobError, jobForCall, jobProgress, retryJob, stageText, subscribe as subscribeTx, tx } from '../tx'
-import { barHtml, callTitle, diffWords, esc, fmtClock, fmtDate, fmtDuration, fmtNumber, fmtTime, fold, h, rx, speakerDefault, speakerName, toast } from '../util'
+import { barHtml, callTitle, diffWords, esc, fmtClock, fmtDate, fmtDuration, fmtNumber, fmtTime, fold, h, rx, speakerDefault, speakerName, toast, toastAction } from '../util'
 
 // (rótulo, balão) para quem não é o microfone
 const PALETTE = [
@@ -61,17 +61,19 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     const [label, box] = styleFor(s, order)
     const me = s?.track === 'mic'
     const edited = b.edited ? ` data-edited title="${esc(t('call.original', { text: b.original_text }))}"` : ''
-    return `<article id="b-${b.id}" data-block="${b.id}"${edited} class="flex ${me ? 'justify-end' : 'justify-start'}">
+    return `<article id="b-${b.id}" data-block="${b.id}"${edited} class="relative flex ${me ? 'justify-end' : 'justify-start'} group-data-[selecting]/sel:cursor-pointer group-data-[selecting]/sel:pl-9">
       <div class="relative min-w-[14rem] max-w-[46rem] rounded-2xl border ${box} px-4 py-3 shadow-sm">
-        <button type="button" data-edit title="${esc(t('call.edit_block'))}" aria-label="${esc(t('call.edit_block'))}" class="absolute right-2 top-2 rounded-lg px-1.5 py-0.5 text-sm leading-none text-zinc-500 hover:bg-white/5 hover:text-violet-300 focus-visible:outline focus-visible:outline-1 focus-visible:outline-violet-400/60">✎</button>
-        <div class="mb-1 flex items-center gap-2 pr-7 text-xs">
+        <button type="button" data-delete title="${esc(t('call.delete_block'))}" aria-label="${esc(t('call.delete_block'))}" class="absolute right-9 top-2 rounded-lg px-1.5 py-1 text-zinc-500 hover:bg-white/5 hover:text-rose-300 focus-visible:outline focus-visible:outline-1 focus-visible:outline-rose-400/60 group-data-[selecting]/sel:hidden"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 10v6M14 10v6"/></svg></button>
+        <button type="button" data-edit title="${esc(t('call.edit_block'))}" aria-label="${esc(t('call.edit_block'))}" class="absolute right-2 top-2 rounded-lg px-1.5 py-0.5 text-sm leading-none text-zinc-500 hover:bg-white/5 hover:text-violet-300 focus-visible:outline focus-visible:outline-1 focus-visible:outline-violet-400/60 group-data-[selecting]/sel:hidden">✎</button>
+        <div class="mb-1 flex items-center gap-2 pr-14 text-xs">
           <button type="button" data-speaker-btn class="font-semibold ${label}">${esc(nameOf(s))}</button>
           <a href="#/call/${libraryId}/${callId}?b=${b.id}" data-anchor class="font-mono text-zinc-500 hover:text-zinc-200">${fmtTime(b.t_start)}</a>
           <span data-badge class="hidden items-center rounded-full bg-amber-400/10 px-2 py-px text-[10px] font-medium text-amber-300">${esc(t('call.edited'))}</span>
           <button type="button" data-revert class="hidden items-center rounded-full px-2 py-px text-[10px] text-zinc-500 hover:bg-white/5 hover:text-zinc-200">↺ ${esc(t('call.revert'))}</button>
         </div>
         <p data-text class="leading-relaxed text-zinc-200">${esc(b.text)}</p>
-      </div></article>`
+      </div>
+      <span data-check aria-hidden="true" class="absolute left-0 top-3.5 hidden h-5 w-5 items-center justify-center rounded-md border border-white/25 bg-ink-900 text-[13px] leading-none text-transparent group-data-[selecting]/sel:flex">✓</span></article>`
   }
 
   /** Chamada recém-gravada: sem transcrição (transcript_id null; blocos, falantes e capítulos vêm vazios). */
@@ -188,6 +190,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
           </div>
           <button id="assign" type="button" class="shrink-0 whitespace-nowrap rounded-xl border border-white/10 bg-ink-900 px-3 py-2 text-sm text-zinc-300 hover:border-violet-400/50">${esc(t('call.assign'))}</button>
           <button id="apply-glossary" type="button" ${pending ? 'hidden' : ''} title="${esc(t('glossary.apply_hint'))}" class="shrink-0 whitespace-nowrap rounded-xl border border-white/10 bg-ink-900 px-3 py-2 text-sm text-zinc-300 hover:border-violet-400/50">${esc(t('glossary.apply'))}</button>
+          <button id="select-btn" type="button" ${pending ? 'hidden' : ''} aria-pressed="false" title="${esc(t('call.select_hint'))}" class="shrink-0 whitespace-nowrap rounded-xl border border-white/10 bg-ink-900 px-3 py-2 text-sm text-zinc-300 hover:border-violet-400/50">${esc(t('call.select'))}</button>
           <button id="history" type="button" class="shrink-0 whitespace-nowrap rounded-xl border border-white/10 bg-ink-900 px-3 py-2 text-sm text-zinc-300 hover:border-violet-400/50">${esc(t('call.history'))}</button>
         </div>
         <div class="mt-1.5 flex min-h-4 items-center justify-between gap-3 text-xs">
@@ -200,9 +203,15 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
         <nav class="max-h-[calc(100vh-var(--hdr)-2rem)] space-y-0.5 overflow-y-auto pr-2">
           <p class="px-3 pb-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-600">${esc(t('call.nav'))}</p>${nav}</nav>
       </aside>
-      <main id="blocks" class="min-w-0">${pending ? pendingHtml() : `${body}
+      <main id="blocks" class="group/sel min-w-0">${pending ? pendingHtml() : `${body}
         <p class="mt-14 text-center text-xs text-zinc-700">${esc(t('call.end'))}</p>`}</main>
-    </div>`
+    </div>
+    ${pending ? '' : `<div id="select-bar" hidden class="sticky bottom-4 z-30 mx-auto mb-4 flex w-fit max-w-[calc(100%-2rem)] flex-wrap items-center justify-center gap-x-3 gap-y-2 rounded-2xl border border-violet-400/30 bg-ink-900/95 px-4 py-2.5 shadow-2xl backdrop-blur-md">
+      <span id="select-count" aria-live="polite" class="min-w-[6.5rem] text-sm font-medium text-white"></span>
+      <button type="button" data-sel="all" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/5 hover:text-zinc-100">${esc(t('select.all'))}</button>
+      <button type="button" data-sel="none" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/5 hover:text-zinc-100">${esc(t('select.none'))}</button>
+      <button type="button" id="select-delete" data-sel="delete" class="rounded-xl border border-rose-400/50 bg-rose-500/15 px-4 py-2 text-sm font-medium text-rose-100 hover:bg-rose-500/25 disabled:cursor-not-allowed disabled:opacity-40">${esc(t('delete.action'))}</button>
+      <button type="button" data-sel="cancel" class="${btnCls.btn}">${esc(t('common.cancel'))}</button></div>`}`
     ro?.disconnect()
     const header = el.querySelector('header')!
     const syncHeader = () => el.style.setProperty('--hdr', getComputedStyle(header).position === 'sticky' ? `${header.offsetHeight}px` : '0px')
@@ -210,6 +219,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     ro = new ResizeObserver(syncHeader)
     ro.observe(header); ro.observe(el)
     bind()
+    paintSelect()
     if (keepScroll) el.scrollTop = scroll
   }
 
@@ -250,6 +260,8 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
       el.querySelectorAll<HTMLElement>(`[data-nav="${s.id}"]`).forEach(a => (a.hidden = !vis))
     })
     $('#count').textContent = v ? t('call.matches', { n }) : ''
+    // o que a busca esconde sai da seleção: só se exclui o que se vê
+    if (selecting) { for (const b of blocks()) if (b.hidden) selected.delete(idOf(b)); paintSelect() }
   }
 
   // ------------------------------------------------------------ edição por trecho
@@ -399,6 +411,8 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
   }
 
   function describeEntry(e: HistoryEntry) {
+    if (e.batch_kind === 'delete') return t('delete.done', { n: e.batch_size ?? 1 })
+    if (e.batch_kind === 'restore') return t('delete.restored', { n: e.batch_size ?? 1 })
     if (e.batch_id) return t(e.origin === 'import' ? 'history.glossary_import' : 'history.glossary_batch', { n: e.batch_size ?? 1 })
     const spk = speakerById()
     const blk = d.blocks.find(b => b.id === e.entity_id)
@@ -407,6 +421,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
       case 'block_speaker': return t('history.block_speaker', { seq: blk ? `#${blk.seq}` : '', from: nameOf(spk.get(Number(e.old_value))), to: nameOf(spk.get(Number(e.new_value))) })
       case 'call_title': return t('history.call_title')
       case 'speaker_name': return t('history.speaker_name', { to: e.new_value ?? t('history.cleared') })
+      case 'block_deleted': return t(e.new_value ? 'delete.done' : 'delete.restored', { n: 1 })
     }
   }
 
@@ -464,6 +479,101 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
       await hooks.reloadNav()
       toast(t('assign.done', { place: target ? libName(target) : '' }))
       location.hash = `#/call/${moved.library_id}/${moved.call_id}`
+    } catch (e) { toast(describeError(e), 'err') }
+  }
+
+  // ------------------------------------------------------------ seleção e exclusão
+  // Exclusão lógica: o bloco some da tela e da busca, mas texto, seq e áudio ficam; "Desfazer" (e o histórico) restauram.
+  let selecting = false
+  const selected = new Set<number>()
+  let anchor: number | null = null
+  let alive = true
+  const idOf = (b: HTMLElement) => Number(b.dataset.block)
+  const visibleBlocks = () => blocks().filter(b => !b.hidden)
+  const CHECK_ON = ['border-violet-400', 'bg-violet-500', 'text-white']
+  const CHECK_OFF = ['border-white/25', 'bg-ink-900', 'text-transparent']
+
+  /** Reflete `selecting`/`selected` na tela (caixas, realce, barra de ações, botão do cabeçalho). Roda a cada `draw`. */
+  function paintSelect() {
+    const main = el.querySelector<HTMLElement>('#blocks')
+    main?.toggleAttribute('data-selecting', selecting)
+    main?.classList.toggle('select-none', selecting)
+    for (const b of blocks()) {
+      const on = selected.has(idOf(b))
+      b.toggleAttribute('data-selected', on)
+      if (selecting) { b.setAttribute('role', 'checkbox'); b.setAttribute('aria-checked', String(on)); b.setAttribute('aria-label', t('call.select_message', { seq: blockData(b).seq })); b.tabIndex = 0 }
+      else for (const a of ['role', 'aria-checked', 'aria-label', 'tabindex']) b.removeAttribute(a)
+      const bubble = b.firstElementChild as HTMLElement
+      bubble.classList.toggle('ring-2', on)
+      bubble.classList.toggle('ring-violet-400/60', on)
+      const chk = b.querySelector<HTMLElement>('[data-check]')
+      chk?.classList.remove(...(on ? CHECK_OFF : CHECK_ON))
+      chk?.classList.add(...(on ? CHECK_ON : CHECK_OFF))
+    }
+    const bar = el.querySelector<HTMLElement>('#select-bar')
+    if (bar) {
+      bar.hidden = !selecting
+      el.querySelector('#select-count')!.textContent = t('select.count', { n: selected.size })
+      el.querySelector<HTMLButtonElement>('#select-delete')!.disabled = !selected.size
+    }
+    const btn = el.querySelector<HTMLButtonElement>('#select-btn')
+    if (btn) {
+      btn.setAttribute('aria-pressed', String(selecting))
+      btn.classList.toggle('border-violet-400/60', selecting)
+      btn.classList.toggle('border-white/10', !selecting)
+      btn.classList.toggle('text-white', selecting)
+      btn.classList.toggle('text-zinc-300', !selecting)
+    }
+  }
+
+  /** Liga/desliga o modo. Ao ligar, um editor aberto é salvo antes (mesmo caminho do `leave`); se falhar, o modo não liga. */
+  async function setSelecting(on: boolean) {
+    if (on === selecting || noTranscript()) return
+    if (on && !(await leave())) return
+    selecting = on
+    if (!on) { selected.clear(); anchor = null }
+    paintSelect()
+  }
+
+  /** Clique marca/desmarca; Shift+clique marca o intervalo (só os trechos visíveis) desde o último clique. */
+  function toggleSelect(b: HTMLElement, range: boolean) {
+    const id = idOf(b)
+    const vis = visibleBlocks()
+    const i = anchor == null ? -1 : vis.findIndex(x => idOf(x) === anchor), j = vis.indexOf(b)
+    if (range && i >= 0 && j >= 0) vis.slice(Math.min(i, j), Math.max(i, j) + 1).forEach(x => selected.add(idOf(x)))
+    else if (selected.has(id)) selected.delete(id)
+    else selected.add(id)
+    anchor = id
+    paintSelect()
+  }
+
+  function selectAll(on: boolean) {
+    selected.clear()
+    if (on) visibleBlocks().forEach(b => selected.add(idOf(b)))
+    anchor = null
+    paintSelect()
+  }
+
+  /** Confirma (com a contagem), exclui num lote só e oferece "Desfazer". */
+  async function deleteBlocks(ids: number[]) {
+    if (!ids.length) return
+    if (!(await confirmDialog(t('delete.confirm_title', { n: ids.length }), t('delete.confirm_body'), t('delete.action')))) return
+    // o editor aberto numa mensagem que vai embora fecha sem salvar: salvar depois (leave/autosave) seria editar uma mensagem excluída
+    const ob = openBlock()
+    if (ob && ids.includes(idOf(ob))) closeEditor(ob)
+    let done: number[]
+    try { done = (await api.deleteBlocks(libraryId, ids)).changed.map(b => b.id) }
+    catch (e) { toast(describeError(e), 'err'); return }
+    selected.clear(); anchor = null; selecting = false
+    await reload()
+    if (done.length) toastAction(t('delete.done', { n: done.length }), t('delete.undo'), () => void restoreBlocks(done))
+  }
+
+  async function restoreBlocks(ids: number[]) {
+    try {
+      const r = await api.restoreBlocks(libraryId, ids)
+      if (alive) await reload()
+      toast(t('delete.restored', { n: r.changed.length }))
     } catch (e) { toast(describeError(e), 'err') }
   }
 
@@ -684,6 +794,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     $('#history').addEventListener('click', showHistory)
     $('#assign').addEventListener('click', assign)
     $('#apply-glossary').addEventListener('click', applyGlossary)
+    el.querySelector('#select-btn')?.addEventListener('click', () => void setSelecting(!selecting))
     el.querySelector('#speakers-btn')?.addEventListener('click', speakersDialog)
     el.querySelector('#redo-btn')?.addEventListener('click', redoDialog)
     el.querySelector('#bleed-btn')?.addEventListener('click', bleedDialog)
@@ -728,6 +839,10 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     if (document.querySelector('dialog[open]')) return
     const q = $<HTMLInputElement>('#q')
     if (target === q && e.key === 'Escape') { e.preventDefault(); q.value = ''; runSearch(); q.blur(); return }
+    if (selecting && e.key === 'Escape') { e.preventDefault(); void setSelecting(false); return }
+    // espaço/Enter numa mensagem em foco marca/desmarca (a mensagem faz o papel de caixa de seleção)
+    const sb = selecting ? target.closest<HTMLElement>('[data-block]') : null
+    if (sb && target === sb && (e.key === ' ' || e.key === 'Enter')) { e.preventDefault(); toggleSelect(sb, e.shiftKey); return }
     if (target.matches('input, textarea, select')) return
     if (e.key === '/') { e.preventDefault(); q.focus() }
     if (e.key === 'Escape') { q.value = ''; runSearch(); q.blur() }
@@ -744,7 +859,17 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
       else if (act === 'retry') void (job && job.state === 'failed' ? retryJob(job) : enqueueCall(libraryId, callId))
       return
     }
+    const sel = target.closest<HTMLElement>('[data-sel]')?.dataset.sel
+    if (sel) {
+      if (sel === 'all') selectAll(true)
+      else if (sel === 'none') selectAll(false)
+      else if (sel === 'cancel') void setSelecting(false)
+      else if (sel === 'delete') void deleteBlocks([...selected])
+      return
+    }
     const blk = target.closest<HTMLElement>('[data-block]')
+    if (blk && selecting) { e.preventDefault(); toggleSelect(blk, e.shiftKey); return }
+    if (blk && target.closest('[data-delete]')) { void deleteBlocks([idOf(blk)]); return }
     if (blk && target.closest('[data-edit]')) { openEditor(blk); return }
     if (blk && target.closest('[data-save]')) { void saveEditor(blk); return }
     if (blk && target.closest('[data-cancel]')) { cancelEditor(blk); return }
@@ -793,6 +918,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     busy,
     leave,
     dispose: () => {
+      alive = false
       offs.forEach(f => f())
       panel.remove()
       io?.disconnect()

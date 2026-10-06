@@ -216,7 +216,7 @@ fn copy_rows(src: &Library, dst: &mut Library, call_id: i64, client_id: Option<i
                 }
             }
             let mut bs = s.prepare(
-                "SELECT id, seq, t_start, t_end, speaker_id, original_text, text, edited_at FROM blocks WHERE transcript_id = ?1",
+                "SELECT id, seq, t_start, t_end, speaker_id, original_text, text, edited_at, deleted_at FROM blocks WHERE transcript_id = ?1",
             )?;
             let brows = bs.query_map([t.0], |r| {
                 Ok((
@@ -228,14 +228,15 @@ fn copy_rows(src: &Library, dst: &mut Library, call_id: i64, client_id: Option<i
                     r.get::<_, String>(5)?,
                     r.get::<_, String>(6)?,
                     r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<String>>(8)?,
                 ))
             })?;
             for b in brows {
                 let b = b?;
                 tx.execute(
-                    "INSERT INTO blocks (transcript_id, seq, t_start, t_end, speaker_id, original_text, text, edited_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![new_t, b.1, b.2, b.3, speakers[&b.4], b.5, b.6, b.7],
+                    "INSERT INTO blocks (transcript_id, seq, t_start, t_end, speaker_id, original_text, text, edited_at, deleted_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![new_t, b.1, b.2, b.3, speakers[&b.4], b.5, b.6, b.7, b.8],
                 )?;
                 blocks.insert(b.0, tx.last_insert_rowid());
             }
@@ -283,7 +284,7 @@ fn copy_rows(src: &Library, dst: &mut Library, call_id: i64, client_id: Option<i
         for row in rows {
             let (entity, eid, old, new, origin, at, undone, batch, batch_kind) = row?;
             let (eid, old, new) = match entity.as_str() {
-                "block_text" => (blocks.get(&eid).copied(), old, new),
+                "block_text" | "block_deleted" => (blocks.get(&eid).copied(), old, new),
                 "block_speaker" => (blocks.get(&eid).copied(), map_speaker(old), map_speaker(new)),
                 "call_title" => (Some(new_call), old, new),
                 "speaker_name" => (speakers.get(&eid).copied(), old, new),

@@ -494,5 +494,22 @@
   "call.bleed_reason.energy_short": "short passage, low volume",
   "settings.transcription.runtime": "Transcription environment",
   "nav.queue": "Queue",
-  "transcription.queued_hint": "In the queue; it will be transcribed next."
+  "transcription.queued_hint": "In the queue; it will be transcribed next.",
+  "call.delete_block": "Delete this message",
+  "call.select": "Select",
+  "call.select_hint": "Select messages to delete several at once",
+  "call.select_message": "Select message {seq}",
+  "select.count_one": "1 selected",
+  "select.count_other": "{n} selected",
+  "select.all": "Select all",
+  "select.none": "Select none",
+  "delete.action": "Delete",
+  "delete.confirm_title_one": "Delete 1 message?",
+  "delete.confirm_title_other": "Delete {n} messages?",
+  "delete.confirm_body": "Deleting is reversible: the content disappears from the call and from search, but the original text and the audio are kept. You can undo it right away or from the history.",
+  "delete.done_one": "1 message deleted",
+  "delete.done_other": "{n} messages deleted",
+  "delete.undo": "Undo",
+  "delete.restored_one": "1 message restored",
+  "delete.restored_other": "{n} messages restored"
 }

@@ -87,7 +87,7 @@ fn v1_databases_upgrade_cleanly() {
 
     let row = app.add_library("Empresa", &e.company).unwrap();
     let lib = app.open_library(row.id).unwrap();
-    assert_eq!(lib.conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), 4);
+    assert_eq!(lib.conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), 5);
     // v3 (fase 3): chamadas que já existiam ficam com a transcrição "done"
     assert_eq!(lib.call_summary(1).unwrap().transcription_state, "done");
     let h = lib.history(Some(1), 10).unwrap();

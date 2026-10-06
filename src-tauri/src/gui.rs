@@ -149,6 +149,17 @@ fn revert_block(state: State<AppState>, library_id: i64, block_id: i64) -> R<Blo
     with_lib(&state, library_id, |l| l.revert_block(block_id, Origin::Ui, false))
 }
 
+/// Exclusão lógica de blocos (um lote só no histórico); `restore_blocks` é o "Desfazer" do aviso.
+#[tauri::command(async)]
+fn delete_blocks(state: State<AppState>, library_id: i64, block_ids: Vec<i64>) -> R<BlocksChange> {
+    with_lib(&state, library_id, |l| l.delete_blocks(&block_ids, Origin::Ui, false))
+}
+
+#[tauri::command(async)]
+fn restore_blocks(state: State<AppState>, library_id: i64, block_ids: Vec<i64>) -> R<BlocksChange> {
+    with_lib(&state, library_id, |l| l.restore_blocks(&block_ids, Origin::Ui, false))
+}
+
 #[tauri::command(async)]
 fn set_title(state: State<AppState>, library_id: i64, call_id: i64, title: String) -> R<CallSummary> {
     with_lib(&state, library_id, |l| l.set_title(call_id, &title, Origin::Ui, false))
@@ -518,6 +529,8 @@ pub fn run(data_dir: Option<PathBuf>) {
             call_detail,
             set_block_text,
             revert_block,
+            delete_blocks,
+            restore_blocks,
             set_title,
             rename_speaker,
             set_block_speaker,

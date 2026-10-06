@@ -41,7 +41,7 @@ fn search_library(lib: &Library, fts: &str, limit: usize) -> Result<Vec<SearchHi
          JOIN blocks b ON b.id = blocks_fts.rowid
          JOIN transcripts t ON t.id = b.transcript_id AND t.is_active = 1
          JOIN calls c ON c.id = t.call_id
-         WHERE blocks_fts MATCH ?1
+         WHERE blocks_fts MATCH ?1 AND b.deleted_at IS NULL
          ORDER BY bm25(blocks_fts) LIMIT ?4",
     )?;
     let rows = stmt.query_map(params![fts, marks.0, marks.1, limit as i64], |r| {

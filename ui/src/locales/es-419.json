@@ -494,5 +494,22 @@
   "call.bleed_reason.energy_short": "fragmento corto, volumen bajo",
   "settings.transcription.runtime": "Entorno de transcripción",
   "nav.queue": "Cola",
-  "transcription.queued_hint": "En cola; se transcribirá enseguida."
+  "transcription.queued_hint": "En cola; se transcribirá enseguida.",
+  "call.delete_block": "Eliminar este mensaje",
+  "call.select": "Seleccionar",
+  "call.select_hint": "Selecciona mensajes para eliminar varios a la vez",
+  "call.select_message": "Seleccionar el mensaje {seq}",
+  "select.count_one": "1 seleccionado",
+  "select.count_other": "{n} seleccionados",
+  "select.all": "Seleccionar todos",
+  "select.none": "Quitar selección",
+  "delete.action": "Eliminar",
+  "delete.confirm_title_one": "¿Eliminar 1 mensaje?",
+  "delete.confirm_title_other": "¿Eliminar {n} mensajes?",
+  "delete.confirm_body": "Se puede revertir: el contenido desaparece de la llamada y de la búsqueda, pero el texto original y el audio se conservan. Puedes deshacerlo enseguida o desde el historial.",
+  "delete.done_one": "1 mensaje eliminado",
+  "delete.done_other": "{n} mensajes eliminados",
+  "delete.undo": "Deshacer",
+  "delete.restored_one": "1 mensaje restaurado",
+  "delete.restored_other": "{n} mensajes restaurados"
 }

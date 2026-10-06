@@ -27,21 +27,25 @@ export interface SpeakerInfo { id: number; track: 'mic' | 'sys'; label: string; 
 export interface BlockInfo {
   id: number; seq: number; t_start: number; t_end: number; speaker_id: number
   text: string; original_text: string; edited: boolean
+  /** preenchido = bloco excluído (exclusão lógica); só vem em `deleted_blocks`, nunca em `blocks` */
+  deleted_at: string | null
 }
+/** `delete_blocks`/`restore_blocks`: o que mudou e o que já estava no estado pedido (sem erro, sem histórico) */
+export interface BlocksChange { changed: BlockInfo[]; unchanged: BlockInfo[] }
 export interface Chapter { t: number; title: string }
 export interface CallDetail extends CallSummary {
   library_name: string; language: string | null; expected_speakers: number | null
   /** null = chamada sem transcrição ainda (pendente): transcripts/speakers/blocks/chapters vêm vazios */
   transcript_id: number | null; transcripts: TranscriptInfo[]; speakers: SpeakerInfo[]
-  blocks: BlockInfo[]; chapters: Chapter[]
+  blocks: BlockInfo[]; deleted_blocks: BlockInfo[]; chapters: Chapter[]
   audio: { mic_path: string | null; sys_path: string | null; deleted_at: string | null }
 }
 export interface HistoryEntry {
-  id: number; call_id: number; entity: 'block_text' | 'block_speaker' | 'call_title' | 'speaker_name'
+  id: number; call_id: number; entity: 'block_text' | 'block_speaker' | 'call_title' | 'speaker_name' | 'block_deleted'
   entity_id: number; old_value: string | null; new_value: string | null
   origin: 'ui' | 'cli' | 'import'; at: string; undone_at: string | null
   /** lote (ex.: glossário aplicado): null = edição avulsa */
-  batch_id: number | null; batch_kind: 'glossary' | null; batch_size: number | null
+  batch_id: number | null; batch_kind: 'glossary' | 'delete' | 'restore' | null; batch_size: number | null
 }
 // ---- glossário (ver GLOSSARY_CONTRACT.md)
 export type RuleKind = 'term' | 'replace'
@@ -276,6 +280,8 @@ export const api = {
   setBlockText: (libraryId: number, blockId: number, text: string) =>
     call<BlockEdit>('set_block_text', { libraryId, blockId, text }),
   revertBlock: (libraryId: number, blockId: number) => call<BlockInfo>('revert_block', { libraryId, blockId }),
+  deleteBlocks: (libraryId: number, blockIds: number[]) => call<BlocksChange>('delete_blocks', { libraryId, blockIds }),
+  restoreBlocks: (libraryId: number, blockIds: number[]) => call<BlocksChange>('restore_blocks', { libraryId, blockIds }),
   setTitle: (libraryId: number, callId: number, title: string) =>
     call<CallSummary>('set_title', { libraryId, callId, title }),
   renameSpeaker: (libraryId: number, speakerId: number, name: string | null) =>

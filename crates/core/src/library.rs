@@ -173,7 +173,7 @@ impl Library {
             .optional()?
             .ok_or_else(|| Error::not_found(format!("call {}:{id}", self.id())))?;
         if let Some(tid) = self.active_transcript_id(id)? {
-            let mut stmt = self.conn.prepare("SELECT text, edited_at IS NOT NULL FROM blocks WHERE transcript_id = ?1 ORDER BY seq")?;
+            let mut stmt = self.conn.prepare("SELECT text, edited_at IS NOT NULL FROM blocks WHERE transcript_id = ?1 AND deleted_at IS NULL ORDER BY seq")?;
             let mut first = Vec::new();
             for row in stmt.query_map([tid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)))? {
                 let (t, edited) = row?;
@@ -222,6 +222,10 @@ impl Library {
                 Some(t) => self.blocks(t)?,
                 None => Vec::new(),
             },
+            deleted_blocks: match transcript_id {
+                Some(t) => self.deleted_blocks(t)?,
+                None => Vec::new(),
+            },
             chapters: self.chapters(id)?,
             audio: AudioInfo { mic_path, sys_path, deleted_at },
         })
@@ -257,28 +261,34 @@ impl Library {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Blocos vivos da versão (os excluídos ficam de fora: tela, textos e contagens partem daqui).
     pub fn blocks(&self, transcript_id: i64) -> Result<Vec<BlockInfo>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, seq, t_start, t_end, speaker_id, text, original_text, edited_at IS NOT NULL
-             FROM blocks WHERE transcript_id = ?1 ORDER BY seq",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {BLOCK_COLS} FROM blocks WHERE transcript_id = ?1 AND deleted_at IS NULL ORDER BY seq"
+        ))?;
         let rows = stmt.query_map([transcript_id], block_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Blocos excluídos da versão, com o `seq` que tinham (`rstt edit restore` usa esse número).
+    pub fn deleted_blocks(&self, transcript_id: i64) -> Result<Vec<BlockInfo>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {BLOCK_COLS} FROM blocks WHERE transcript_id = ?1 AND deleted_at IS NOT NULL ORDER BY seq"
+        ))?;
+        let rows = stmt.query_map([transcript_id], block_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Um bloco pelo id, vivo ou excluído (`deleted_at` diz qual).
     pub fn block(&self, block_id: i64) -> Result<BlockInfo> {
         self.conn
-            .query_row(
-                "SELECT id, seq, t_start, t_end, speaker_id, text, original_text, edited_at IS NOT NULL
-                 FROM blocks WHERE id = ?1",
-                [block_id],
-                block_from_row,
-            )
+            .query_row(&format!("SELECT {BLOCK_COLS} FROM blocks WHERE id = ?1"), [block_id], block_from_row)
             .optional()?
             .ok_or_else(|| Error::not_found(format!("block {block_id}")))
     }
 
-    /// Bloco pelo número de sequência (como aparece em `show`) na versão ativa.
+    /// Bloco pelo número de sequência (como aparece em `show`) na versão ativa. Acha também os
+    /// excluídos: o `seq` não muda, e é assim que `restore` os encontra.
     pub fn block_id_by_seq(&self, call_id: i64, seq: i64) -> Result<i64> {
         let tid = self.active_transcript_id(call_id)?.ok_or_else(|| Error::not_found("active transcript"))?;
         self.conn
@@ -339,10 +349,17 @@ impl Library {
         }
         self.edit(dry_run, |tx| {
             let call_id = Self::call_of_block(tx, block_id)?;
+            Self::ensure_alive(tx, block_id)?;
             let old: String = tx.query_row("SELECT text FROM blocks WHERE id = ?1", [block_id], |r| r.get(0))?;
             let edit_id = write_block_text(tx, call_id, block_id, &new_text, origin, None)?;
             Ok((read_block(tx, block_id)?, edit_id, old))
         })
+    }
+
+    /// Bloco excluído não se edita: restaura primeiro (o texto e o histórico dele ficam como estão).
+    fn ensure_alive(tx: &Connection, block_id: i64) -> Result<()> {
+        let deleted: bool = tx.query_row("SELECT deleted_at IS NOT NULL FROM blocks WHERE id = ?1", [block_id], |r| r.get(0))?;
+        if deleted { Err(Error::Conflict(format!("block {block_id} is deleted; restore it first"))) } else { Ok(()) }
     }
 
     pub fn revert_block(&mut self, block_id: i64, origin: Origin, dry_run: bool) -> Result<BlockInfo> {
@@ -440,6 +457,7 @@ impl Library {
     pub fn set_block_speaker(&mut self, block_id: i64, speaker_id: i64, origin: Origin, dry_run: bool) -> Result<BlockInfo> {
         self.edit(dry_run, |tx| {
             let call_id = Self::call_of_block(tx, block_id)?;
+            Self::ensure_alive(tx, block_id)?;
             let ok = tx
                 .query_row("SELECT 1 FROM speakers WHERE id = ?1 AND call_id = ?2", params![speaker_id, call_id], |_| Ok(()))
                 .optional()?;
@@ -452,6 +470,47 @@ impl Library {
                 record(tx, call_id, "block_speaker", block_id, Some(&old.to_string()), Some(&speaker_id.to_string()), origin)?;
             }
             read_block(tx, block_id)
+        })
+    }
+
+    /// Exclui blocos (exclusão lógica) numa transação só e num lote só do histórico. Já excluído
+    /// vem em `unchanged`, sem erro e sem histórico; id inexistente desfaz tudo (`not_found`).
+    pub fn delete_blocks(&mut self, block_ids: &[i64], origin: Origin, dry_run: bool) -> Result<BlocksChange> {
+        self.set_blocks_deleted(block_ids, true, origin, dry_run)
+    }
+
+    /// Desfaz `delete_blocks`: o bloco volta com o mesmo `seq` e texto, e reentra na busca.
+    pub fn restore_blocks(&mut self, block_ids: &[i64], origin: Origin, dry_run: bool) -> Result<BlocksChange> {
+        self.set_blocks_deleted(block_ids, false, origin, dry_run)
+    }
+
+    fn set_blocks_deleted(&mut self, block_ids: &[i64], delete: bool, origin: Origin, dry_run: bool) -> Result<BlocksChange> {
+        let mut ids = Vec::with_capacity(block_ids.len());
+        for id in block_ids {
+            if !ids.contains(id) {
+                ids.push(*id);
+            }
+        }
+        if ids.is_empty() {
+            return Err(Error::invalid("no blocks given"));
+        }
+        self.edit(dry_run, |tx| {
+            let batch = new_batch(tx, if delete { "delete" } else { "restore" })?;
+            let now = db::now();
+            let mut out = BlocksChange { changed: vec![], unchanged: vec![] };
+            for id in ids {
+                let call_id = Self::call_of_block(tx, id)?;
+                let old: Option<String> = tx.query_row("SELECT deleted_at FROM blocks WHERE id = ?1", [id], |r| r.get(0))?;
+                if old.is_some() == delete {
+                    out.unchanged.push(read_block(tx, id)?);
+                    continue;
+                }
+                let new = delete.then(|| now.clone());
+                tx.execute("UPDATE blocks SET deleted_at = ?1 WHERE id = ?2", params![new, id])?;
+                record_in(tx, call_id, "block_deleted", id, old.as_deref(), new.as_deref(), origin, Some(batch))?;
+                out.changed.push(read_block(tx, id)?);
+            }
+            Ok(out)
         })
     }
 
@@ -585,6 +644,9 @@ impl Drop for Library {
     }
 }
 
+/// Colunas de `blocks` na ordem de `block_from_row`.
+const BLOCK_COLS: &str = "id, seq, t_start, t_end, speaker_id, text, original_text, edited_at IS NOT NULL, deleted_at";
+
 fn block_from_row(r: &rusqlite::Row) -> rusqlite::Result<BlockInfo> {
     Ok(BlockInfo {
         id: r.get(0)?,
@@ -595,6 +657,7 @@ fn block_from_row(r: &rusqlite::Row) -> rusqlite::Result<BlockInfo> {
         text: r.get(5)?,
         original_text: r.get(6)?,
         edited: r.get(7)?,
+        deleted_at: r.get(8)?,
     })
 }
 
@@ -638,17 +701,17 @@ fn undo_entry(tx: &Connection, e: &HistoryEntry) -> Result<()> {
         "speaker_name" => {
             tx.execute("UPDATE speakers SET name = ?1 WHERE id = ?2", params![old, e.entity_id])?;
         }
+        // excluir e restaurar gravam o `deleted_at` de antes em `old_value`: desfazer é voltar a ele
+        "block_deleted" => {
+            tx.execute("UPDATE blocks SET deleted_at = ?1 WHERE id = ?2", params![old, e.entity_id])?;
+        }
         other => return Err(Error::invalid(format!("cannot undo {other}"))),
     }
     Ok(())
 }
 
 fn read_block(tx: &Connection, block_id: i64) -> Result<BlockInfo> {
-    Ok(tx.query_row(
-        "SELECT id, seq, t_start, t_end, speaker_id, text, original_text, edited_at IS NOT NULL FROM blocks WHERE id = ?1",
-        [block_id],
-        block_from_row,
-    )?)
+    Ok(tx.query_row(&format!("SELECT {BLOCK_COLS} FROM blocks WHERE id = ?1"), [block_id], block_from_row)?)
 }
 
 pub(crate) fn apply_block_text(tx: &Connection, block_id: i64, new_text: &str, original: &str) -> Result<()> {

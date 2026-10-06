@@ -79,6 +79,16 @@ pub struct BlockInfo {
     pub text: String,
     pub original_text: String,
     pub edited: bool,
+    /// Preenchido = bloco excluído (exclusão lógica; texto, `seq` e áudio continuam). Fora de `blocks` da chamada.
+    pub deleted_at: Option<String>,
+}
+
+/// Resultado de `delete_blocks`/`restore_blocks`: o que mudou e o que já estava no estado pedido
+/// (idempotente: excluir um bloco já excluído, ou restaurar um vivo, não é erro e não grava histórico).
+#[derive(Debug, Clone, Serialize)]
+pub struct BlocksChange {
+    pub changed: Vec<BlockInfo>,
+    pub unchanged: Vec<BlockInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +117,8 @@ pub struct CallDetail {
     pub transcripts: Vec<TranscriptInfo>,
     pub speakers: Vec<SpeakerInfo>,
     pub blocks: Vec<BlockInfo>,
+    /// Blocos excluídos da versão (com `deleted_at`), para `rstt edit restore` achar o `seq`.
+    pub deleted_blocks: Vec<BlockInfo>,
     pub chapters: Vec<Chapter>,
     pub audio: AudioInfo,
 }
@@ -125,7 +137,7 @@ pub struct HistoryEntry {
     /// Alterações feitas juntas (p.ex. glossário aplicado à chamada) compartilham o `batch_id`
     /// e são desfeitas juntas. `None` = edição avulsa.
     pub batch_id: Option<i64>,
-    /// Tipo do lote: hoje só `"glossary"`.
+    /// Tipo do lote: `"glossary"`, `"delete"` ou `"restore"` (exclusão/restauração de blocos).
     pub batch_kind: Option<String>,
     /// Quantas entradas o lote tem (para "glossário aplicado (N blocos)").
     pub batch_size: Option<i64>,

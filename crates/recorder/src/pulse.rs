@@ -21,6 +21,7 @@ use libpulse_binding::stream::Direction;
 use libpulse_simple_binding::Simple;
 
 use crate::backend::{CHANNELS, CaptureBackend, CaptureStream, DeviceInfo, DeviceKind, SAMPLE_RATE};
+use crate::playback::{PlaybackSink, failed};
 use crate::{Error, Result};
 
 /// Formato pedido ao servidor.
@@ -205,6 +206,56 @@ impl CaptureStream for PulseStream {
     fn latency(&self) -> Option<Duration> {
         // 0 = o servidor não soube dizer
         self.simple.get_latency().ok().map(|l| Duration::from_micros(l.0)).filter(|d| !d.is_zero())
+    }
+}
+
+/// Buffer de reprodução do servidor: pequeno para pausar/pular soarem na hora (o padrão do servidor é ~2 s).
+const PLAYBACK_BUFFER_MS: u32 = 200;
+
+/// Abre a saída padrão do servidor (a variável `PULSE_SINK` do processo é respeitada, pois não se escolhe
+/// um sink pelo nome: quem usa o player usa o que o sistema usa).
+pub fn open_sink(rate: u32) -> Result<Box<dyn PlaybackSink>> {
+    let spec = Spec { format: Format::S16NE, channels: CHANNELS as u8, rate };
+    if !spec.is_valid() {
+        return Err(failed(format!("invalid sample rate {rate}")));
+    }
+    let bytes = |ms: u32| (u64::from(rate) * 2 * u64::from(ms) / 1000) as u32;
+    // `tlength` = o que fica em fila; `prebuf` = quanto encher antes de começar; `minreq` = o resto, a cargo do servidor
+    let attr = BufferAttr {
+        maxlength: u32::MAX,
+        tlength: bytes(PLAYBACK_BUFFER_MS),
+        prebuf: bytes(PLAYBACK_BUFFER_MS / 2),
+        minreq: u32::MAX,
+        fragsize: u32::MAX,
+    };
+    let simple = Simple::new(None, APP_NAME, Direction::Playback, None, "playback", &spec, None, Some(&attr))
+        .map_err(|e| Error::BackendUnavailable(format!("PulseAudio/PipeWire: {e}")))?;
+    Ok(Box::new(PulseSink { simple, bytes: Vec::new() }))
+}
+
+/// Fluxo de reprodução (síncrono, bloqueante). Não é `Send`: vive na thread do player.
+struct PulseSink {
+    simple: Simple,
+    bytes: Vec<u8>,
+}
+
+impl PlaybackSink for PulseSink {
+    fn write(&mut self, samples: &[i16]) -> Result<()> {
+        self.bytes.clear();
+        self.bytes.extend(samples.iter().flat_map(|s| s.to_ne_bytes()));
+        self.simple.write(&self.bytes).map_err(failed)
+    }
+
+    fn latency(&self) -> Option<Duration> {
+        self.simple.get_latency().ok().map(|l| Duration::from_micros(l.0))
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        self.simple.flush().map_err(failed)
+    }
+
+    fn drain(&mut self) -> Result<()> {
+        self.simple.drain().map_err(failed)
     }
 }
 

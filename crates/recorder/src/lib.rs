@@ -3,12 +3,14 @@
 //!
 //! - `backend`: traits `CaptureBackend`/`CaptureStream` + `default_backend()` (env `RSTT_FAKE_AUDIO`).
 //! - `pulse` (Linux, feature `pulse`): libpulse. `fake`: tons sintéticos, sem dispositivos.
+//! - `playback`: saída do player (issue #22), `PlaybackSink` + `FakeSink`; o libpulse mora em `pulse::open_sink`.
 //! - `session`: `Session` (gravar), `Monitor` (só níveis), `StreamChoice`.
 //! - `wav`: `WavWriter`, `repair_wav`. `sidecar`: `recording.json`. `levels`: medidores.
 pub mod backend;
 pub mod error;
 pub mod fake;
 pub mod levels;
+pub mod playback;
 #[cfg(all(target_os = "linux", feature = "pulse"))]
 pub mod pulse;
 pub mod session;
@@ -20,6 +22,7 @@ pub use backend::{
 };
 pub use error::{Error, Result};
 pub use fake::FakeBackend;
+pub use playback::{FakeSink, PlaybackSink, SinkOpener, default_sink_opener};
 pub use levels::{LevelMeter, Levels, StreamLevel};
 pub use session::{Monitor, Session, SessionStatus, StartOptions, StreamChoice, StreamStatus};
 pub use sidecar::{Cut, Sidecar, State, StreamMeta};

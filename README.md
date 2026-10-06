@@ -89,7 +89,6 @@ transcription engine. Remove the folder to erase everything.
 
 Open work, tracked in [GitHub Issues](https://github.com/petebarbosa/Transcriptary/issues):
 
-- [#19](https://github.com/petebarbosa/Transcriptary/issues/19) Explain the transcription queue and environment states, and offer actions for each.
 - [#15](https://github.com/petebarbosa/Transcriptary/issues/15) Hide the recording bar during screen sharing.
 - [#12](https://github.com/petebarbosa/Transcriptary/issues/12) Verify the Arch PKGBUILD with a full source build.
 - [#11](https://github.com/petebarbosa/Transcriptary/issues/11) Calibrate glossary hotwords and the speaker threshold with new calls.

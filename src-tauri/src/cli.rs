@@ -3,7 +3,7 @@
 //! `origin = cli`) e avisam a app aberta pelo socket local para ela recarregar.
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use core_lib::import::{self, ImportOptions};
 use core_lib::recording::{self as core_rec, Meta, StartRequest};
 use core_lib::model::{ClientInfo, Rule, RuleKind};
@@ -411,8 +411,33 @@ enum SettingsCmd {
 
 const SETTING_KEYS: &[&str] = &["language", "me_name", "transcription_language"];
 
+/// Idioma da ajuda, decidido antes do `clap` ler a linha: `--lang` (ou `--lang=`) olhado direto nos
+/// argumentos, senão o do sistema; o que não for pt-BR/en-US/es-419 vira inglês (`Lang::parse`/`system`).
+/// A ajuda não abre o banco, então a configuração `language` do app não entra aqui.
+fn help_lang(args: &[std::ffi::OsString]) -> Lang {
+    let mut it = args.iter().skip(1).map(|a| a.to_string_lossy());
+    while let Some(a) = it.next() {
+        let value = match &*a {
+            "--" => break,
+            "--lang" => it.next().map(|v| v.into_owned()),
+            s => s.strip_prefix("--lang=").map(str::to_string),
+        };
+        if let Some(v) = value {
+            return Lang::parse(&v).unwrap_or_else(Lang::system);
+        }
+    }
+    Lang::system()
+}
+
+/// `Cli::try_parse_from` com a ajuda (`--help`, subcomandos, erros de uso) em `lang`.
+fn parse_localized(args: Vec<std::ffi::OsString>, lang: Lang) -> Result<Cli, clap::Error> {
+    let mut cmd = crate::help::localize(Cli::command(), lang);
+    let mut matches = cmd.clone().try_get_matches_from(args)?;
+    Cli::from_arg_matches_mut(&mut matches).map_err(|e| e.format(&mut cmd))
+}
+
 pub fn run(args: Vec<std::ffi::OsString>) -> i32 {
-    let cli = match Cli::try_parse_from(args) {
+    let cli = match parse_localized(args.clone(), help_lang(&args)) {
         Ok(c) => c,
         Err(e) => {
             let _ = e.print();
@@ -697,9 +722,22 @@ fn exec_transcribe(app: &App, a: TranscribeArgs, lang: Lang, sock: &std::path::P
     Ok(Output::Json(to_json(job)?, changed(library_id, Some(call_id))))
 }
 
-/// A CLI só sabe da pausa do usuário (a pausa por gravação é da app).
-fn cli_pause(app: &App) -> Option<PauseReason> {
-    (app.setting(keys::QUEUE_PAUSED).ok().flatten().as_deref() == Some("1")).then_some(PauseReason::User)
+/// Há gravação em curso? Pergunta à app aberta pelo socket (`status`), a mesma fonte que a GUI usa para
+/// pausar a fila. Sem app, ou sem resposta: não há gravação (nunca sobe a GUI só para listar a fila).
+fn recording_now(sock: &std::path::Path) -> bool {
+    call(sock, &Request::Status).is_ok_and(|s| s["state"] == "recording")
+}
+
+/// Fila como a GUI a mostra: `paused` é o motivo que a GUI mostra (`pause_reason`: com os dois ao mesmo
+/// tempo vale `user`, que continua depois que a gravação acaba) e `paused_reasons` lista todos os
+/// motivos ativos (`["user", "recording"]`), para não esconder nenhum.
+fn queue_json(app: &App, sock: &std::path::Path, recent: usize) -> core_lib::Result<Value> {
+    let user = app.setting(keys::QUEUE_PAUSED).ok().flatten().as_deref() == Some("1");
+    let recording = recording_now(sock);
+    let mut v = to_json(queue::status(app, crate::transcription::pause_reason(user, recording), recent)?)?;
+    let reasons: Vec<PauseReason> = [user.then_some(PauseReason::User), recording.then_some(PauseReason::Recording)].into_iter().flatten().collect();
+    v["paused_reasons"] = to_json(reasons)?;
+    Ok(v)
 }
 
 /// `queue [list]` lê o banco; `pause`/`resume`/`cancel` gravam e a app aplica no polling. `cancel` só alcança
@@ -708,11 +746,11 @@ fn exec_queue(app: &App, what: QueueCmd, lang: Lang, sock: &std::path::Path) -> 
     const RECENT: usize = 20;
     let notify = || Some(json!({"event": "changed"}));
     match what {
-        QueueCmd::List => Ok(Output::Json(to_json(queue::status(app, cli_pause(app), RECENT)?)?, None)),
+        QueueCmd::List => Ok(Output::Json(queue_json(app, sock, RECENT)?, None)),
         QueueCmd::Pause | QueueCmd::Resume => {
             let paused = matches!(what, QueueCmd::Pause);
             app.set_setting(keys::QUEUE_PAUSED, Some(if paused { "1" } else { "0" }))?;
-            Ok(Output::Json(to_json(queue::status(app, cli_pause(app), RECENT)?)?, notify()))
+            Ok(Output::Json(queue_json(app, sock, RECENT)?, notify()))
         }
         QueueCmd::Cancel { id } => {
             match queue::get(app, id)?.state {
@@ -1326,6 +1364,83 @@ mod tests {
         assert_eq!(v["state"], "idle");
     }
 
+    /// `queue list` pergunta à app (fake) se há gravação: `recording`, `user` e os dois ao mesmo tempo.
+    #[test]
+    fn queue_list_reports_recording_and_user_pauses() {
+        let (tmp, app) = setup();
+        let gui = fake_gui(tmp.path());
+        let list = || match exec_queue(&app, QueueCmd::List, Lang::EnUs, &gui.sock).unwrap() {
+            Output::Json(v, _) => v,
+            Output::Text(_) => panic!("texto inesperado"),
+        };
+        let view = |v: &Value| (v["paused"].clone(), v["paused_reasons"].clone());
+
+        // ocioso: fila andando
+        assert_eq!(view(&list()), (Value::Null, json!([])));
+        // gravando: pausa distinta da do usuário
+        exec_record(&app, rec_cmd(&["start", "--title", "T"]), Lang::EnUs, false, &gui.sock).unwrap();
+        assert_eq!(view(&list()), (json!("recording"), json!(["recording"])));
+        // os dois: `paused` é o que a GUI mostra (user) e `paused_reasons` não esconde a gravação
+        app.set_setting(keys::QUEUE_PAUSED, Some("1")).unwrap();
+        assert_eq!(view(&list()), (json!("user"), json!(["user", "recording"])));
+        // gravação acabou: só a do usuário
+        exec_record(&app, RecordCmd::Stop, Lang::EnUs, false, &gui.sock).unwrap();
+        assert_eq!(view(&list()), (json!("user"), json!(["user"])));
+        // `queue pause`/`resume` devolvem o mesmo formato
+        let Output::Json(v, _) = exec_queue(&app, QueueCmd::Resume, Lang::EnUs, &gui.sock).unwrap() else { panic!() };
+        assert_eq!(view(&v), (Value::Null, json!([])));
+        // sem app aberta: nunca "recording"
+        let none = tmp.path().join("nope.sock");
+        let Output::Json(v, _) = exec_queue(&app, QueueCmd::List, Lang::EnUs, &none).unwrap() else { panic!() };
+        assert_eq!(view(&v), (Value::Null, json!([])));
+    }
+
+    fn help_text(args: &[&str], lang: Lang) -> String {
+        let argv = std::iter::once("rstt").chain(args.iter().copied()).map(std::ffi::OsString::from).collect();
+        match parse_localized(argv, lang) {
+            Err(e) if !e.use_stderr() => e.render().to_string(),
+            _ => panic!("esperava a ajuda de {args:?}"),
+        }
+    }
+
+    #[test]
+    fn help_follows_the_language() {
+        let want = [
+            (Lang::PtBr, "Gravação e transcrição de reuniões, local", "Uso:", "Cria uma regra", "Diferencia maiúsculas de minúsculas"),
+            (Lang::EnUs, "Local meeting recording and transcription", "Usage:", "Creates a rule", "Case-sensitive"),
+            (Lang::Es419, "Grabación y transcripción de reuniones, local", "Uso:", "Crea una regla", "Distingue mayúsculas de minúsculas"),
+        ];
+        for (lang, about, usage, add, case) in want {
+            let root = help_text(&["--help"], lang);
+            assert!(root.contains(about) && root.contains(usage), "{}: {root}", lang.tag());
+            let sub = help_text(&["glossary", "add", "--help"], lang);
+            assert!(sub.contains(add) && sub.contains(case) && sub.contains(usage), "{}: {sub}", lang.tag());
+            // as opções globais valem em todos os subcomandos, no mesmo idioma
+            assert!(sub.contains(match lang { Lang::PtBr => "Diretório de dados", Lang::EnUs => "Data directory", Lang::Es419 => "Directorio de datos" }));
+        }
+        // o que não é pt-BR/en-US/es-419 cai em inglês (mesma `Lang::parse` do app e da CLI)
+        for tag in ["de_DE.UTF-8", "C", "fr-FR", ""] {
+            assert_eq!(Lang::parse(tag).unwrap_or(Lang::EnUs), Lang::EnUs, "{tag}");
+        }
+        assert_eq!(Lang::parse("pt_BR.UTF-8"), Some(Lang::PtBr));
+        assert_eq!(Lang::parse("es_MX.UTF-8"), Some(Lang::Es419));
+        // o comando continua o mesmo: dá para executar com a ajuda localizada
+        let cli = parse_localized(["rstt", "queue", "list"].map(Into::into).to_vec(), Lang::Es419).unwrap();
+        assert!(matches!(cli.cmd, Cmd::Queue { what: Some(QueueCmd::List) }));
+    }
+
+    #[test]
+    fn lang_flag_is_read_before_help() {
+        let args = |a: &[&str]| a.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        assert_eq!(help_lang(&args(&["rstt", "--lang", "es-419", "--help"])), Lang::Es419);
+        assert_eq!(help_lang(&args(&["rstt", "queue", "--lang=pt-BR", "--help"])), Lang::PtBr);
+        assert_eq!(help_lang(&args(&["rstt", "--lang", "en", "glossary", "--help"])), Lang::EnUs);
+        // depois de `--` já não é opção
+        assert_eq!(help_lang(&args(&["rstt", "--", "--lang", "es"])), Lang::system());
+        // idioma desconhecido em --lang: o do sistema
+        assert_eq!(help_lang(&args(&["rstt", "--lang", "de", "--help"])), Lang::system());
+    }
+
     #[test]
     fn record_cli_without_app() {
         let (tmp, app) = setup();
@@ -1377,7 +1492,7 @@ mod tests {
         let call = "call_2026-06-01_10-00-00";
         // fila vazia e pausa do usuário (é o que a CLI grava; a app aplica no polling)
         let (v, notify) = run(&app, &["queue"]).unwrap();
-        assert_eq!(v, json!({"paused": null, "jobs": []}));
+        assert_eq!(v, json!({"paused": null, "paused_reasons": [], "jobs": []}));
         assert!(notify.is_none());
         let (v, notify) = run(&app, &["queue", "pause"]).unwrap();
         assert_eq!(v["paused"], "user");

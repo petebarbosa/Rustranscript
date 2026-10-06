@@ -4,6 +4,7 @@
 mod bar;
 mod cli;
 mod gui;
+mod help;
 mod i18n;
 mod ipc;
 mod recording;

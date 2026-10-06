@@ -17,7 +17,7 @@ use core_lib::transcription::commit::{self, BleedRemoval};
 use core_lib::transcription::engine::{Engine, ProcessEngine, WorkerLaunch};
 use core_lib::transcription::models::{self, DownloadProgress, ModelStatus};
 use core_lib::transcription::params::JobOptions;
-use core_lib::transcription::queue::{self, JobInfo, JobKind, JobState, PauseReason, QueueStatus};
+use core_lib::transcription::queue::{self, Gate, JobInfo, JobKind, JobState, PauseReason, QueueStatus};
 use core_lib::transcription::runner::{self, CancelReason, JobProgress, RunEnd, Stage};
 use core_lib::transcription::runtime::{self, RuntimeProgress, RuntimeStatus};
 use core_lib::transcription::{FAKE_WORKER_ENV, keys};
@@ -244,6 +244,14 @@ fn setting_on(app: &App, key: &str, default: bool) -> bool {
     }
 }
 
+/// Fila com o motivo de cada tarefa não andar (`queue::Gate`): `fake` = worker falso (dispensa runtime e modelos).
+/// `installing_runtime` vem do estado da instalação desta app; a CLI não sabe dela e passa `false`.
+pub(crate) fn queue_status_with(app: &App, paused: Option<PauseReason>, installing_runtime: bool, fake: bool, recent: usize) -> core_lib::Result<QueueStatus> {
+    let runtime = if fake { "fake".to_string() } else { runtime::status(&app.data_dir)?.state };
+    let models_ready = fake || models::model_paths(&app.data_dir).is_ok();
+    queue::status(app, &Gate { paused, runtime: &runtime, models_ready, installing_runtime }, recent)
+}
+
 /// Pausa do usuário (`transcription_queue_paused`; a CLI grava o mesmo valor).
 fn user_paused(app: &App) -> bool {
     setting_on(app, keys::QUEUE_PAUSED, false)
@@ -319,6 +327,7 @@ struct Ctx<'a> {
     shared: &'a Shared,
     host: &'a dyn Host,
     app: &'a App,
+    choice: &'a EngineChoice,
     /// Último estado emitido (JSON): `queue-changed` só sai quando muda.
     sig: RefCell<String>,
 }
@@ -336,7 +345,11 @@ impl Ctx<'_> {
     }
 
     fn status(&self) -> Option<Value> {
-        let st = queue::status(self.app, self.pause(), RECENT).ok()?;
+        let installing = {
+            let s = lock(&self.shared.setup);
+            s.running && s.phase.as_deref() == Some("runtime")
+        };
+        let st = queue_status_with(self.app, self.pause(), installing, !matches!(self.choice, EngineChoice::Real), RECENT).ok()?;
         serde_json::to_value(st).ok()
     }
 
@@ -385,7 +398,7 @@ fn run_loop(shared: &Shared, host: &dyn Host, rx: &Receiver<()>, data_dir: &Path
         Ok(a) => a,
         Err(e) => return eprintln!("transcription: {}: {}", e.code(), e.detail()),
     };
-    let ctx = Ctx { shared, host, app: &app, sig: RefCell::new(String::new()) };
+    let ctx = Ctx { shared, host, app: &app, choice, sig: RefCell::new(String::new()) };
     let mut log = LogOnce(None);
     // `running` que sobrou de uma queda: já tem versão → `done`; senão volta à fila e retoma do bruto
     if let Err(e) = queue::recover_after_crash(&app) {
@@ -564,7 +577,12 @@ fn shutdown(tx: &TxState) {
 
 fn queue_status_now(handle: &AppHandle, app: &App) -> core_lib::Result<QueueStatus> {
     let recording = handle.state::<RecState>().is_recording();
-    queue::status(app, pause_reason(user_paused(app), recording), RECENT)
+    let installing = {
+        let tx = handle.state::<TxState>();
+        let s = lock(&tx.shared.setup);
+        s.running && s.phase.as_deref() == Some("runtime")
+    };
+    queue_status_with(app, pause_reason(user_paused(app), recording), installing, fake_env().is_some(), RECENT)
 }
 
 /// Avisa a UI (e só ela) de que a fila mudou por um comando.
@@ -574,13 +592,24 @@ fn publish(handle: &AppHandle, app: &App) {
     }
 }
 
+/// `publish` fora de um comando (thread da instalação): abre o `Mutex<App>` só pelo tempo de ler a fila.
+fn republish(handle: &AppHandle) {
+    let state = handle.state::<AppState>();
+    let _ = with_app(&state, |app| {
+        publish(handle, app);
+        Ok(())
+    });
+}
+
 #[tauri::command(async)]
 pub(crate) fn transcription_status(handle: AppHandle, state: State<AppState>, tx: State<TxState>) -> R<TranscriptionStatus> {
     with_app(&state, |app| {
+        // fora do literal: o guard temporário viveria até o fim da expressão e `queue_status_now` trava o mesmo mutex
+        let setup = lock(&tx.shared.setup).clone();
         Ok(TranscriptionStatus {
             runtime: runtime_status(&app.data_dir)?,
             models: models::status(&app.data_dir)?,
-            setup: lock(&tx.shared.setup).clone(),
+            setup,
             queue: queue_status_now(&handle, app)?,
             fake_worker: fake_env().is_some(),
         })
@@ -601,9 +630,12 @@ pub(crate) fn transcription_setup_start(handle: AppHandle, state: State<AppState
     tx.shared.setup_cancel.store(false, Ordering::SeqCst);
     let shared = tx.shared.clone();
     let data_dir = state.data_dir.clone();
+    // as tarefas passam de `runtime_missing/outdated` para `runtime_installing`
+    republish(&handle);
     std::thread::spawn(move || {
         let result = run_setup(&handle, &shared, &data_dir);
         *lock(&shared.setup) = SetupState { running: false, phase: None };
+        republish(&handle);
         let _ = handle.emit(EV_SETUP, SetupEvent::finished(result.err().map(CmdError::from)));
         // com tudo instalado, o que estava `queued` pode andar
         shared.wake();
@@ -617,6 +649,7 @@ fn run_setup(handle: &AppHandle, shared: &Shared, data_dir: &Path) -> core_lib::
         runtime::ensure(data_dir, &mut |p| { let _ = handle.emit(EV_SETUP, SetupEvent::runtime(p)); }, cancel)?;
     }
     lock(&shared.setup).phase = Some("models".into());
+    republish(handle);
     // ~10 eventos por segundo no máximo; o fim de cada arquivo passa sempre
     let mut last: Option<(Instant, String)> = None;
     models::ensure(
@@ -764,6 +797,8 @@ mod tests {
             created_at: "2026-10-02T10:00:00".into(),
             started_at: Some("2026-10-02T10:00:03".into()),
             finished_at: None,
+            blocked_by: None,
+            ahead: None,
         }
     }
 
@@ -774,11 +809,16 @@ mod tests {
             "id": 3, "library_id": 1, "call_id": 7, "call_key": "call_2026-10-01_08-21-52", "kind": "full", "state": "running",
             "options": {"language": null, "expected_speakers": null, "bleed_filter": null, "bleed_margin_db": null, "diarization_threshold": null},
             "base_job_id": null, "attempts": 1, "stage": "asr_sys", "progress": 0.42, "error_code": null, "error_detail": null,
-            "created_at": "2026-10-02T10:00:00", "started_at": "2026-10-02T10:00:03", "finished_at": null
+            "created_at": "2026-10-02T10:00:00", "started_at": "2026-10-02T10:00:03", "finished_at": null,
+            "blocked_by": null, "ahead": null
         });
         assert_eq!(serde_json::to_value(job()).unwrap(), want);
-        let st = |paused| serde_json::to_value(QueueStatus { paused, jobs: vec![job()] }).unwrap();
-        assert_eq!(st(None), json!({"paused": null, "jobs": [want.clone()]}));
+        let st = |paused| serde_json::to_value(QueueStatus { paused, blocked_by: None, jobs: vec![job()] }).unwrap();
+        assert_eq!(st(None), json!({"paused": null, "blocked_by": null, "jobs": [want.clone()]}));
+        let queued = JobInfo { state: JobState::Queued, blocked_by: Some(queue::BlockedBy::RuntimeOutdated), ahead: Some(0), ..job() };
+        assert_eq!(serde_json::to_value(queued).unwrap()["blocked_by"], "runtime_outdated");
+        let all = [queue::BlockedBy::PausedUser, queue::BlockedBy::PausedRecording, queue::BlockedBy::RuntimeInstalling, queue::BlockedBy::RuntimeMissing, queue::BlockedBy::RuntimeOutdated, queue::BlockedBy::ModelsMissing, queue::BlockedBy::Behind];
+        assert_eq!(serde_json::to_value(all).unwrap(), json!(["paused_user", "paused_recording", "runtime_installing", "runtime_missing", "runtime_outdated", "models_missing", "behind"]));
         assert_eq!(st(Some(PauseReason::User))["paused"], "user");
         assert_eq!(st(Some(PauseReason::Recording))["paused"], "recording");
     }
@@ -786,20 +826,20 @@ mod tests {
     #[test]
     fn transcription_status_json_matches_contract() {
         let v = serde_json::to_value(TranscriptionStatus {
-            runtime: RuntimeStatus { state: "ready".into(), runtime_version: 1, python: "3.12.15".into(), uv: "0.12.22".into(), installed_at: Some("2026-10-02T09:00:00".into()) },
+            runtime: RuntimeStatus { state: "ready".into(), runtime_version: 1, python: "3.12.15".into(), uv: "0.12.22".into(), installed_at: Some("2026-10-02T09:00:00".into()), differences: vec![] },
             models: vec![ModelStatus { id: "whisper".into(), installed: true, bytes_total: 10, bytes_done: 10, local: false }],
             setup: SetupState { running: true, phase: Some("models".into()) },
-            queue: QueueStatus { paused: None, jobs: vec![] },
+            queue: QueueStatus { paused: None, blocked_by: None, jobs: vec![] },
             fake_worker: false,
         })
         .unwrap();
         assert_eq!(
             v,
             json!({
-                "runtime": {"state": "ready", "runtime_version": 1, "python": "3.12.15", "uv": "0.12.22", "installed_at": "2026-10-02T09:00:00"},
+                "runtime": {"state": "ready", "runtime_version": 1, "python": "3.12.15", "uv": "0.12.22", "installed_at": "2026-10-02T09:00:00", "differences": []},
                 "models": [{"id": "whisper", "installed": true, "bytes_total": 10, "bytes_done": 10, "local": false}],
                 "setup": {"running": true, "phase": "models"},
-                "queue": {"paused": null, "jobs": []},
+                "queue": {"paused": null, "blocked_by": null, "jobs": []},
                 "fake_worker": false
             })
         );

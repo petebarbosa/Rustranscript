@@ -54,6 +54,65 @@ pub struct JobInfo {
     pub created_at: String,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
+    /// Só preenchidos por `status` (nas `queued`): por que ela não começa e quantas tarefas estão na frente
+    /// (a rodando + as enfileiradas antes). `None` em `get`/`enqueue` e nas outras tarefas.
+    #[serde(default)]
+    pub blocked_by: Option<BlockedBy>,
+    #[serde(default)]
+    pub ahead: Option<i64>,
+}
+
+/// Por que uma tarefa (ou a fila toda) não anda. Em ordem de precedência (a primeira que vale ganha; é a ordem em
+/// que o laço do shell testa): pausa do usuário → pausa por gravação → instalação em curso → runtime ausente →
+/// runtime desatualizado → modelos ausentes. `behind` só existe por tarefa: a fila pode andar, mas há outra na frente.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockedBy {
+    PausedUser,
+    PausedRecording,
+    RuntimeInstalling,
+    RuntimeMissing,
+    RuntimeOutdated,
+    ModelsMissing,
+    Behind,
+}
+
+/// O que o shell sabe e o núcleo não: pausa, estado do runtime (`RuntimeStatus.state`), modelos e instalação.
+#[derive(Debug, Clone, Copy)]
+pub struct Gate<'a> {
+    pub paused: Option<PauseReason>,
+    /// `missing` | `outdated` | `ready` | `fake`
+    pub runtime: &'a str,
+    /// Os 3 modelos instalados (ou worker falso, que dispensa).
+    pub models_ready: bool,
+    /// Instalação do runtime em andamento (a fase de modelos não conta: o runtime já está pronto).
+    pub installing_runtime: bool,
+}
+
+impl Gate<'static> {
+    /// Nada impede a fila (testes e quem não liga para o ambiente).
+    pub const READY: Gate<'static> = Gate { paused: None, runtime: "ready", models_ready: true, installing_runtime: false };
+}
+
+impl Gate<'_> {
+    /// Motivo que vale para a fila inteira; `None` = pode rodar a próxima tarefa.
+    pub fn blocker(&self) -> Option<BlockedBy> {
+        match self.paused {
+            Some(PauseReason::User) => return Some(BlockedBy::PausedUser),
+            Some(PauseReason::Recording) => return Some(BlockedBy::PausedRecording),
+            None => {}
+        }
+        if !matches!(self.runtime, "ready" | "fake") {
+            return Some(if self.installing_runtime {
+                BlockedBy::RuntimeInstalling
+            } else if self.runtime == "outdated" {
+                BlockedBy::RuntimeOutdated
+            } else {
+                BlockedBy::RuntimeMissing
+            });
+        }
+        (!self.models_ready).then_some(BlockedBy::ModelsMissing)
+    }
 }
 
 /// Por que a fila não está andando. `user`: configuração `transcription_queue_paused`; `recording`: há
@@ -70,6 +129,9 @@ pub enum PauseReason {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueStatus {
     pub paused: Option<PauseReason>,
+    /// `Gate::blocker`: o que para a fila toda, esteja ela vazia ou não (`null` = anda).
+    #[serde(default)]
+    pub blocked_by: Option<BlockedBy>,
     pub jobs: Vec<JobInfo>,
 }
 
@@ -102,6 +164,8 @@ fn from_row(r: &rusqlite::Row) -> rusqlite::Result<JobInfo> {
         created_at: r.get(13)?,
         started_at: r.get(14)?,
         finished_at: r.get(15)?,
+        blocked_by: None,
+        ahead: None,
     })
 }
 
@@ -266,11 +330,19 @@ fn list(app: &App, sql_where: &str, limit: i64) -> Result<Vec<JobInfo>> {
 }
 
 /// `recent` = quantas tarefas terminadas incluir (a UI usa 20).
-pub fn status(app: &App, paused: Option<PauseReason>, recent: usize) -> Result<QueueStatus> {
+pub fn status(app: &App, gate: &Gate, recent: usize) -> Result<QueueStatus> {
     let mut jobs = list(app, "state = 'running' ORDER BY id", -1)?;
+    let running = jobs.len() as i64;
     jobs.extend(list(app, "state = 'queued' ORDER BY id", -1)?);
+    let blocker = gate.blocker();
+    // cada enfileirada: o motivo da fila ou, se ela anda, `behind` quando há alguém na frente
+    for (i, j) in jobs.iter_mut().skip(running as usize).enumerate() {
+        let ahead = running + i as i64;
+        j.ahead = Some(ahead);
+        j.blocked_by = blocker.or((ahead > 0).then_some(BlockedBy::Behind));
+    }
     jobs.extend(list(app, "state IN ('done', 'failed', 'cancelled') ORDER BY id DESC", recent as i64)?);
-    Ok(QueueStatus { paused, jobs })
+    Ok(QueueStatus { paused: gate.paused, blocked_by: blocker, jobs })
 }
 
 /// A próxima `queued` (menor id), sem alterar nada.

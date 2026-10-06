@@ -65,6 +65,17 @@ pub struct RuntimeStatus {
     pub python: String,
     pub uv: String,
     pub installed_at: Option<String>,
+    /// O que difere do esperado quando `state = outdated` (vazio nos outros estados).
+    pub differences: Vec<RuntimeDiff>,
+}
+
+/// Um campo do manifest instalado que não bate com o do binário. `field`: `runtime_version` | `uv` | `python` |
+/// `lock` (dependências) | `worker` (os dois últimos são sha256 abreviados).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RuntimeDiff {
+    pub field: &'static str,
+    pub installed: String,
+    pub expected: String,
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -93,6 +104,25 @@ fn expected_manifest(installed_at: String) -> Manifest {
     }
 }
 
+fn short(hash: &str) -> String {
+    hash.chars().take(12).collect()
+}
+
+/// Campos que o manifest instalado tem diferentes do esperado (o que `ensure` vai refazer).
+fn manifest_diff(installed: &Manifest, want: &Manifest) -> Vec<RuntimeDiff> {
+    let d = |field, installed: String, expected: String| (installed != expected).then_some(RuntimeDiff { field, installed, expected });
+    [
+        d("runtime_version", installed.runtime_version.to_string(), want.runtime_version.to_string()),
+        d("uv", installed.uv.clone(), want.uv.clone()),
+        d("python", installed.python.clone(), want.python.clone()),
+        d("lock", short(&installed.lock_sha256), short(&want.lock_sha256)),
+        d("worker", short(&installed.worker_sha256), short(&want.worker_sha256)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 fn read_manifest(p: &RuntimePaths) -> Option<Manifest> {
     serde_json::from_slice(&std::fs::read(&p.manifest).ok()?).ok()
 }
@@ -116,6 +146,7 @@ fn refresh_worker_if_only_change(p: &RuntimePaths, installed: &Manifest, want: &
 fn status_with(data_dir: &Path, fake: bool) -> Result<RuntimeStatus> {
     let p = paths(data_dir);
     let manifest = read_manifest(&p);
+    let mut differences = Vec::new();
     let state = if fake {
         "fake"
     } else {
@@ -124,7 +155,12 @@ fn status_with(data_dir: &Path, fake: bool) -> Result<RuntimeStatus> {
             Some(_) if !p.python.exists() => "missing",
             Some(m) => {
                 let want = expected_manifest(m.installed_at.clone());
-                if *m == want || refresh_worker_if_only_change(&p, m, &want) { "ready" } else { "outdated" }
+                if *m == want || refresh_worker_if_only_change(&p, m, &want) {
+                    "ready"
+                } else {
+                    differences = manifest_diff(m, &want);
+                    "outdated"
+                }
             }
         }
     };
@@ -134,6 +170,7 @@ fn status_with(data_dir: &Path, fake: bool) -> Result<RuntimeStatus> {
         python: PYTHON_VERSION.into(),
         uv: UV_VERSION.into(),
         installed_at: manifest.map(|m| m.installed_at),
+        differences,
     })
 }
 
@@ -306,7 +343,9 @@ mod tests {
         for tweak in [|m: &mut Manifest| m.runtime_version += 1, |m: &mut Manifest| m.lock_sha256 = "0".into(), |m: &mut Manifest| m.uv = "0.0.1".into(), |m: &mut Manifest| m.python = "0.0.1".into()] {
             tweak(&mut m);
             std::fs::write(&p.manifest, serde_json::to_vec(&m).unwrap()).unwrap();
-            assert_eq!(status_with(dir.path(), false).unwrap().state, "outdated");
+            let st = status_with(dir.path(), false).unwrap();
+            assert_eq!(st.state, "outdated");
+            assert_eq!(st.differences.len(), 1, "{:?}", st.differences);
             m = expected_manifest("2026-01-01T00:00:00".into());
         }
         // manifest sem o python do venv: não está pronto
@@ -349,7 +388,12 @@ mod tests {
         m.worker_sha256 = "0".into();
         m.lock_sha256 = "0".into();
         std::fs::write(&p.manifest, serde_json::to_vec(&m).unwrap()).unwrap();
-        assert_eq!(status_with(dir.path(), false).unwrap().state, "outdated");
+        let st = status_with(dir.path(), false).unwrap();
+        assert_eq!(st.state, "outdated");
+        // só o que difere, em ordem fixa (a UI mostra isto em "detalhes")
+        let fields: Vec<_> = st.differences.iter().map(|d| d.field).collect();
+        assert_eq!(fields, ["lock", "worker"]);
+        assert_eq!((st.differences[0].installed.as_str(), st.differences[0].expected.len()), ("0", 12));
         assert!(!p.worker.exists());
         assert_eq!(read_manifest(&p).unwrap(), m);
     }

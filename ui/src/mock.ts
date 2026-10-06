@@ -3,7 +3,7 @@
 import { mockIPC } from '@tauri-apps/api/mocks'
 import { emit } from '@tauri-apps/api/event'
 import { TRANSCRIPTION_DEFAULTS } from './api'
-import type { ApplyReport, AudioDeletion, AudioEntry, BleedRemoval, AudioCut, BlockChange, BlockInfo, BlocksChange, CutsChange, BlockSuggestion, CallDetail, ClientInfo, DeviceInfo, GlossaryImportEntry, HistoryEntry, Hit, JobInfo, JobKind, JobOptions, JobProgress, JobStage, LibraryInfo, LevelsEvent, ModelStatus, PauseReason, QueueStatus, Orphan, RecordingInfo, RecordStatus, Rule, SpeakerInfo, StreamChoice, StreamLevel, StreamStatus } from './api'
+import type { ApplyReport, AudioDeletion, AudioEntry, BleedRemoval, BlockedBy, AudioCut, BlockChange, BlockInfo, BlocksChange, CutsChange, BlockSuggestion, CallDetail, ClientInfo, DeviceInfo, GlossaryImportEntry, HistoryEntry, Hit, JobInfo, JobKind, JobOptions, JobProgress, JobStage, LibraryInfo, LevelsEvent, ModelStatus, PauseReason, QueueStatus, Orphan, RecordingInfo, RecordStatus, Rule, SpeakerInfo, StreamChoice, StreamLevel, StreamStatus } from './api'
 
 type Args = Record<string, any>
 
@@ -93,6 +93,11 @@ const calls: Call[] = [
 
 // uma chamada gravada e ainda sem transcrição, para ver o selo/estado vazio em qualquer idioma sem gravar
 calls.push(mkPending(1, 4, 'call_2026-03-03_09-00-00', '', null, 754, { expected_speakers: 3, language: 'pt' }))
+
+// ?backlog=N: mais N chamadas gravadas e pendentes, para ver "N na frente" na fila
+for (let i = 1; i <= Math.min(5, Number(new URLSearchParams(location.search).get('backlog')) || 0); i++) {
+  calls.push(mkPending(1, 40 + i, `call_2026-03-02_1${i}-00-00`, `Reunião de alinhamento ${i}`, null, 600 + i * 120, { language: 'pt' }))
+}
 
 // sem áudio: importada só do texto (nenhuma trilha) e com o áudio apagado (`audio_deleted_at`); a tela não mostra o player
 {
@@ -857,11 +862,13 @@ Object.assign(handlers, {
 // ---------------------------------------------------------------- transcrição (fase 4)
 // Simulação temporizada fiel ao TRANSCRIPTION_CONTRACT §4/§5/§9: fila (um job por vez), etapas com progresso em rajadas de
 // 30 s no ASR e 1ª fase indeterminada na diarização, pausa por gravação/usuário, falha, instalação com download retomável.
-// Flags na URL (o idioma recarrega a página, então vão na query): ?runtime=missing · ?paused=recording · ?fail[=código]
+// Flags na URL (o idioma recarrega a página, então vão na query): ?runtime=missing|outdated · ?paused=recording|user · ?backlog=N
+// · ?fail[=código]
 // · ?hold=<etapa> (congela a tarefa nessa etapa, para capturas) · ?fake (modo de teste) · ?auto=0 (fila não automática).
 const qp = new URLSearchParams(location.search)
 const txFlag = {
-  missing: qp.get('runtime') === 'missing', forcePause: qp.get('paused') === 'recording',
+  missing: qp.get('runtime') === 'missing', outdated: qp.get('runtime') === 'outdated',
+  forcePause: qp.get('paused') === 'recording' ? 'recording' : qp.get('paused') === 'user' ? 'user' : null,
   fail: qp.has('fail') ? qp.get('fail') || 'audio_decode' : null, hold: qp.get('hold') as JobStage | null,
   fake: qp.has('fake'), manual: qp.get('auto') === '0',
 }
@@ -875,7 +882,7 @@ const models: ModelStatus[] = [
   { id: 'segmentation', installed: !txFlag.missing, bytes_total: 6_935_020, bytes_done: txFlag.missing ? 0 : 6_935_020, local: false },
   { id: 'embedding', installed: !txFlag.missing, bytes_total: 28_300_000, bytes_done: txFlag.missing ? 0 : 28_300_000, local: false },
 ]
-let runtimeReady = !txFlag.missing
+let runtimeReady = !txFlag.missing && !txFlag.outdated
 const jobs: JobInfo[] = []
 let jobSeq = 0
 const bleedBy = new Map<number, BleedRemoval[]>() // por id da versão (único no mock)
@@ -885,6 +892,7 @@ let setupRun: { cancel: boolean; phase: 'runtime' | 'models' } | null = null
 async function runSetup() {
   const me: NonNullable<typeof setupRun> = (setupRun = { cancel: false, phase: 'runtime' })
   const ev = (o: Partial<SetupEv>) => emit('transcription-setup', { phase: 'runtime', step: null, index: null, of: null, model: null, file: null, bytes_done: null, bytes_total: null, error: null, ...o })
+  pushQueue() // as tarefas passam a `runtime_installing`
   try {
     if (!runtimeReady) {
       const steps = ['download_uv', 'install_python', 'create_venv', 'sync_packages', 'verify'] as const
@@ -896,6 +904,7 @@ async function runSetup() {
       runtimeReady = true
     }
     me.phase = 'models'
+    pushQueue()
     const todo = models.filter(m => !m.installed)
     for (let i = 0; i < todo.length; i++) {
       const m = todo[i]
@@ -909,29 +918,52 @@ async function runSetup() {
       m.installed = true
     }
     setupRun = null
+    pushQueue()
     await ev({ phase: 'finished' })
   } catch {
     setupRun = null
+    pushQueue()
     await ev({ phase: 'finished', error: { code: 'setup_cancelled', detail: '' } })
   }
 }
 type SetupEv = { phase: string; step: string | null; index: number | null; of: number | null; model: string | null; file: string | null; bytes_done: number | null; bytes_total: number | null; error: { code: string; detail: string } | null }
 
+/** Motor instalado de uma época anterior (`?runtime=outdated`): o que o manifest guarda difere do esperado. */
+function runtimeStatus() {
+  const state = txFlag.fake ? 'fake' : runtimeReady ? 'ready' : txFlag.outdated ? 'outdated' : 'missing'
+  const installed = txFlag.outdated || runtimeReady
+  const differences = state === 'outdated'
+    ? [{ field: 'python', installed: '3.12.8', expected: '3.12.15' }, { field: 'lock', installed: '4c1e9a7b02d5', expected: 'b83f50e6a1c9' }, { field: 'worker', installed: '91d0c47e3a2f', expected: 'e5a7720b6c18' }]
+    : []
+  return { state, runtime_version: 1, python: '3.12.15', uv: '0.12.22', installed_at: installed ? (txFlag.outdated && !runtimeReady ? '2026-09-12T10:03:41' : now()) : null, differences }
+}
+
 const txReady = () => txFlag.fake || (runtimeReady && models.every(m => m.installed))
 function txStatus() {
   return {
-    runtime: { state: txFlag.fake ? 'fake' : runtimeReady ? 'ready' : 'missing', runtime_version: 1, python: '3.12.15', uv: '0.12.22', installed_at: runtimeReady ? now() : null },
+    runtime: runtimeStatus(),
     models: structuredClone(models), setup: { running: !!setupRun, phase: setupRun?.phase ?? null }, queue: queueStatus(), fake_worker: txFlag.fake,
   }
 }
 
 // ---- fila
-const pausedReason = (): PauseReason | null => (settings.transcription_queue_paused === '1' ? 'user' : rec.cur || txFlag.forcePause ? 'recording' : null)
+const pausedReason = (): PauseReason | null => (settings.transcription_queue_paused === '1' || txFlag.forcePause === 'user' ? 'user' : rec.cur || txFlag.forcePause === 'recording' ? 'recording' : null)
+/** Mesma precedência do núcleo (`Gate::blocker`): pausa → instalação → motor ausente → desatualizado → modelos. */
+function queueBlocker(): BlockedBy | null {
+  const paused = pausedReason()
+  if (paused) return paused === 'user' ? 'paused_user' : 'paused_recording'
+  const rt = runtimeStatus().state
+  if (rt !== 'ready' && rt !== 'fake') return setupRun?.phase === 'runtime' ? 'runtime_installing' : rt === 'outdated' ? 'runtime_outdated' : 'runtime_missing'
+  return txFlag.fake || models.every(m => m.installed) ? null : 'models_missing'
+}
 function queueStatus(): QueueStatus {
   const running = jobs.filter(j => j.state === 'running')
   const queued = jobs.filter(j => j.state === 'queued').sort((a, b) => a.id - b.id)
+  const blocker = queueBlocker()
+  for (const j of jobs) { j.blocked_by = null; j.ahead = null }
+  queued.forEach((j, i) => { j.ahead = running.length + i; j.blocked_by = blocker ?? (j.ahead > 0 ? 'behind' : null) })
   const done = jobs.filter(j => !['running', 'queued'].includes(j.state)).sort((a, b) => (b.finished_at ?? '').localeCompare(a.finished_at ?? '') || b.id - a.id).slice(0, 20)
-  return { paused: pausedReason(), jobs: structuredClone([...running, ...queued, ...done]) }
+  return { paused: pausedReason(), blocked_by: blocker, jobs: structuredClone([...running, ...queued, ...done]) }
 }
 const pushQueue = () => void emit('queue-changed', queueStatus())
 const openJob = (c: Call) => jobs.find(j => j.library_id === c.library_id && j.call_id === c.id && (j.state === 'queued' || j.state === 'running'))
@@ -947,7 +979,7 @@ function enqueue(libraryId: number, callId: number, kind: JobKind = 'full', opti
     id: ++jobSeq, library_id: libraryId, call_id: callId, call_key: c.key, kind, state: 'queued',
     options: { language: null, expected_speakers: null, bleed_filter: null, bleed_margin_db: null, diarization_threshold: null, ...(options ?? {}) },
     base_job_id: kind === 'full' ? null : 1, attempts: 0, stage: null, progress: null, error_code: null, error_detail: null,
-    created_at: now(), started_at: null, finished_at: null,
+    created_at: now(), started_at: null, finished_at: null, blocked_by: null, ahead: null,
   }
   jobs.push(j)
   if (c.transcript_id == null && c.transcription_state === 'failed') { c.transcription_state = 'pending'; c.transcription_error = null }

@@ -3,6 +3,7 @@ import { t } from '../i18n'
 import { hooks, libName, meName, store, type View } from '../store'
 import { assignDialog, btnCls, confirmDialog, describeError, describeGlossaryError, field, form, inputCls, renameDialog } from '../dialogs'
 import { cancelJob, enqueueCall, isReady, jobError, jobForCall, jobProgress, retryJob, stageText, subscribe as subscribeTx, tx } from '../tx'
+import { errorHtml, onWhyClick, queuedWhy, whyHtml } from './txwhy'
 import { barHtml, callTitle, diffWords, esc, fmtBytes, fmtClock, fmtDate, fmtDuration, fmtNumber, fmtTime, fold, speakerDefault, speakerName, toast, toastAction } from '../util'
 import { caseBadge, readRule, ruleFields, ruleText, syncKind } from '../rules'
 import { createPlayer, type PlayerCtl } from '../player'
@@ -95,7 +96,6 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
 
   const kindLabel = (j: JobInfo) => t(`queue.kind.${j.kind}`)
   const btnSm = 'rounded-lg border border-white/10 bg-ink-800 px-3 py-1.5 text-xs text-zinc-200 hover:border-violet-400/50'
-  const pausedText = () => (tx.queue.paused ? t(`queue.paused_${tx.queue.paused}`) : '')
 
   /** Estado da chamada sem transcrição: pendente / na fila / transcrevendo (etapa + barra) / falhou (com "tentar de novo"). */
   function pendingHtml() {
@@ -108,12 +108,13 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
       d.audio.mic_path && t('record.track_mic'), d.audio.sys_path && t('record.track_sys'),
     ].filter(Boolean) as string[]
     const tone = k === 'failed' ? 'border-rose-400/30 bg-rose-400/[0.05]' : 'border-white/10 bg-ink-900/60'
-    const err = k === 'failed' ? (job ? jobError(job) : { title: t('error.job_failed'), detail: d.transcription_error ?? '' }) : null
-    const body = k === 'failed' ? `<p class="mx-auto mt-2 max-w-xl text-sm text-rose-200">${esc(err!.title)}</p>${err!.detail ? `<p class="mx-auto mt-1 max-w-xl break-words font-mono text-xs text-zinc-500">${esc(err!.detail)}</p>` : ''}`
+    // chamada `failed` sem tarefa na fila (já limpa): o erro guardado na chamada é "código: detalhe"
+    const stored = /^([a-z_]+): ([\s\S]*)$/.exec(d.transcription_error ?? '')
+    const body = k === 'failed' ? errorHtml(job ?? { error_code: stored?.[1] ?? null, error_detail: stored ? stored[2] : d.transcription_error }, { center: true })
       : k === 'running' && job ? `<p class="mx-auto mt-2 max-w-xl text-sm text-zinc-300">${esc(stageText(job))}</p><div class="mx-auto mt-3 max-w-sm">${barHtml(jobProgress(job).fraction, 'bg-sky-400')}</div>`
+      : k === 'queued' && job ? `<div class="mt-2">${whyHtml(job, { center: true })}</div>`
       : `<p class="mx-auto mt-2 max-w-xl text-sm text-zinc-400">${esc(t(k === 'pending' && !auto ? 'transcription.pending_body_manual' : `transcription.${k}_body`, { error: d.transcription_error ?? '' }))}</p>`
-    const notice = (k === 'queued' && pausedText() ? `<p class="mx-auto mt-3 max-w-xl text-xs text-amber-300">${esc(pausedText())}</p>` : '')
-      + (k !== 'running' && k !== 'failed' && tx.status && !isReady() ? `<p class="mx-auto mt-3 max-w-xl text-xs text-amber-300">${esc(t('transcription.setup_needed'))} <a href="#/settings" class="underline hover:text-amber-100">${esc(t('transcription.open_settings'))}</a></p>` : '')
+    const notice = (k === 'pending' && tx.status && !isReady() ? `<p class="mx-auto mt-3 max-w-xl text-xs text-amber-300">${esc(t('transcription.setup_needed'))} <a href="#/settings" class="underline hover:text-amber-100">${esc(t('transcription.open_settings'))}</a></p>` : '')
     const actions = k === 'pending' && !auto ? `<button type="button" data-tx="enqueue" class="${btnCls.btnPrimary}">${esc(t('transcription.start'))}</button>`
       : k === 'failed' ? `<button type="button" data-tx="retry" class="${btnCls.btnPrimary}">${esc(t('queue.retry'))}</button>`
       : (k === 'queued' || k === 'running') && job ? `<button type="button" data-tx="cancel" class="${btnCls.btn}">${esc(t('queue.cancel'))}</button>` : ''
@@ -142,7 +143,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     const running = j.state === 'running'
     return `<div class="flex flex-wrap items-center gap-3 rounded-xl border border-sky-400/20 bg-sky-400/[0.05] px-3 py-2 text-xs text-zinc-300">
       <span class="font-medium text-sky-200">${esc(kindLabel(j))}</span>
-      <span class="min-w-0 flex-1 truncate">${esc(running ? stageText(j) : pausedText() || t('queue.state.queued'))}</span>
+      <span class="min-w-0 flex-1" title="${esc(running ? '' : queuedWhy(j).text)}">${esc(running ? stageText(j) : queuedWhy(j).text)}</span>
       ${running ? `<div class="w-32 shrink-0">${barHtml(jobProgress(j).fraction, 'bg-sky-400')}</div>` : ''}
       <button type="button" data-tx="cancel" class="${btnSm}">${esc(t('queue.cancel'))}</button></div>`
   }
@@ -1093,6 +1094,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
   }
   const onClick = (e: MouseEvent) => {
     const target = e.target as HTMLElement
+    if (onWhyClick(target)) return
     const act = target.closest<HTMLElement>('[data-tx]')?.dataset.tx
     if (act) {
       const job = jobForCall(libraryId, callId)

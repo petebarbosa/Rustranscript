@@ -219,14 +219,24 @@ export interface JobInfo {
   stage: JobStage | null; progress: number | null
   error_code: string | null; error_detail: string | null
   created_at: string; started_at: string | null; finished_at: string | null
+  /** só nas `queued` da fila: por que não começa (null = é a próxima e vai rodar) e quantas tarefas estão na frente */
+  blocked_by: BlockedBy | null; ahead: number | null
 }
+/**
+ * Por que a fila (ou uma tarefa) não anda, em ordem de precedência; `behind` só existe por tarefa.
+ * `runtime_*` = motor (Python) ausente/desatualizado/instalando; `models_missing` = modelos não baixados.
+ */
+export type BlockedBy = 'paused_user' | 'paused_recording' | 'runtime_installing' | 'runtime_missing' | 'runtime_outdated' | 'models_missing' | 'behind'
 /** 'user' = pausada pelo usuário; 'recording' = há gravação em curso; null = andando */
 export type PauseReason = 'user' | 'recording'
 /** jobs: a rodando primeiro, depois as enfileiradas (por id), depois as últimas 20 terminadas */
-export interface QueueStatus { paused: PauseReason | null; jobs: JobInfo[] }
+export interface QueueStatus { paused: PauseReason | null; blocked_by: BlockedBy | null; jobs: JobInfo[] }
 export interface RuntimeStatus {
   state: 'missing' | 'outdated' | 'ready' | 'fake'; runtime_version: number; python: string; uv: string; installed_at: string | null
+  /** só em `outdated`: o que difere do esperado (`lock`/`worker` são sha256 abreviados) */
+  differences: RuntimeDiff[]
 }
+export interface RuntimeDiff { field: 'runtime_version' | 'uv' | 'python' | 'lock' | 'worker'; installed: string; expected: string }
 export interface ModelStatus {
   id: 'whisper' | 'segmentation' | 'embedding'; installed: boolean; bytes_total: number; bytes_done: number; local: boolean
 }

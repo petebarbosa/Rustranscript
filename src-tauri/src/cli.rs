@@ -218,7 +218,7 @@ enum AudioCmd {
 
 #[derive(Subcommand)]
 enum QueueCmd {
-    /// Tarefas rodando, enfileiradas e as últimas terminadas
+    /// Tarefas rodando, enfileiradas e as últimas terminadas; nas enfileiradas, `blocked_by` diz por que não começa
     List,
     /// Pausa a fila (a tarefa em curso para e volta à fila)
     Pause,
@@ -849,7 +849,8 @@ fn exec_audio(app: &App, cmd: AudioCmd, lang: Lang, sock: &std::path::Path) -> c
 fn queue_json(app: &App, sock: &std::path::Path, recent: usize) -> core_lib::Result<Value> {
     let user = app.setting(keys::QUEUE_PAUSED).ok().flatten().as_deref() == Some("1");
     let recording = recording_now(sock);
-    let mut v = to_json(queue::status(app, crate::transcription::pause_reason(user, recording), recent)?)?;
+    let paused = crate::transcription::pause_reason(user, recording);
+    let mut v = to_json(crate::transcription::queue_status_with(app, paused, false, crate::transcription::fake_env().is_some(), recent)?)?;
     let reasons: Vec<PauseReason> = [user.then_some(PauseReason::User), recording.then_some(PauseReason::Recording)].into_iter().flatten().collect();
     v["paused_reasons"] = to_json(reasons)?;
     Ok(v)
@@ -1631,6 +1632,51 @@ mod tests {
         assert_eq!(view(&v), (Value::Null, json!([])));
     }
 
+    /// `queue list` traz o motivo de cada tarefa enfileirada (`blocked_by`, `ahead`) e o da fila (`blocked_by`),
+    /// com a precedência pausa do usuário > gravação > runtime.
+    #[test]
+    fn queue_list_reports_blocked_by() {
+        if transcription::fake_env().is_some() {
+            return; // com worker falso o runtime não bloqueia
+        }
+        let (tmp, app) = setup();
+        let gui = fake_gui(tmp.path());
+        for id in [1, 2] {
+            app.db
+                .execute(
+                    "INSERT INTO transcription_jobs (id, library_id, call_id, call_key, kind, state, options_json, created_at)
+                     VALUES (?1, 1, ?1, 'call_x', 'full', 'queued', '{}', '2026-10-02T10:00:00')",
+                    [id],
+                )
+                .unwrap();
+        }
+        let list = |sock: &std::path::Path| match exec_queue(&app, QueueCmd::List, Lang::EnUs, sock).unwrap() {
+            Output::Json(v, _) => v,
+            Output::Text(_) => panic!("texto inesperado"),
+        };
+        let view = |v: &Value| (v["blocked_by"].clone(), v["jobs"].as_array().unwrap().iter().map(|j| (j["blocked_by"].clone(), j["ahead"].clone())).collect::<Vec<_>>());
+        let none = tmp.path().join("nope.sock");
+        // sem runtime: a fila e as duas tarefas dizem `runtime_missing` (o `ahead` mostra a ordem)
+        let v = list(&none);
+        assert_eq!(view(&v), (json!("runtime_missing"), vec![(json!("runtime_missing"), json!(0)), (json!("runtime_missing"), json!(1))]));
+        // gravando: a pausa vence o runtime
+        exec_record(&app, rec_cmd(&["start", "--title", "T"]), Lang::EnUs, false, &gui.sock).unwrap();
+        assert_eq!(list(&gui.sock)["blocked_by"], "paused_recording");
+        // usuário e gravação juntos: `paused_user`
+        app.set_setting(keys::QUEUE_PAUSED, Some("1")).unwrap();
+        let v = list(&gui.sock);
+        assert_eq!((v["paused"].clone(), view(&v).0, v["jobs"][1]["blocked_by"].clone()), (json!("user"), json!("paused_user"), json!("paused_user")));
+        exec_record(&app, RecordCmd::Stop, Lang::EnUs, false, &gui.sock).unwrap();
+        app.set_setting(keys::QUEUE_PAUSED, Some("0")).unwrap();
+        // runtime de outra versão no disco: `runtime_outdated` (lê o estado de novo a cada chamada)
+        assert_eq!(list(&none)["blocked_by"], "runtime_missing");
+        let rt = core_lib::transcription::runtime::paths(&app.data_dir);
+        std::fs::create_dir_all(rt.python.parent().unwrap()).unwrap();
+        std::fs::write(&rt.python, b"").unwrap();
+        std::fs::write(&rt.manifest, b"{\"runtime_version\":0,\"uv\":\"0\",\"python\":\"0\",\"lock_sha256\":\"0\",\"worker_sha256\":\"0\",\"installed_at\":\"x\"}").unwrap();
+        assert_eq!(list(&none)["blocked_by"], "runtime_outdated");
+    }
+
     fn help_text(args: &[&str], lang: Lang) -> String {
         let argv = std::iter::once("tary").chain(args.iter().copied()).map(std::ffi::OsString::from).collect();
         match parse_localized(argv, lang) {
@@ -1730,7 +1776,9 @@ mod tests {
         let call = "call_2026-06-01_10-00-00";
         // fila vazia e pausa do usuário (é o que a CLI grava; a app aplica no polling)
         let (v, notify) = run(&app, &["queue"]).unwrap();
-        assert_eq!(v, json!({"paused": null, "paused_reasons": [], "jobs": []}));
+        // sem runtime instalado a fila inteira está parada por isso (com worker falso, não)
+        let blocked = if transcription::fake_env().is_some() { Value::Null } else { json!("runtime_missing") };
+        assert_eq!(v, json!({"paused": null, "blocked_by": blocked, "paused_reasons": [], "jobs": []}));
         assert!(notify.is_none());
         let (v, notify) = run(&app, &["queue", "pause"]).unwrap();
         assert_eq!(v["paused"], "user");

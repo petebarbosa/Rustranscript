@@ -1,12 +1,14 @@
 // Cartão "Preparar a transcrição": estado do ambiente e dos modelos, instalação com progresso (eventos
 // `transcription-setup`), cancelar/retomar e "usar arquivo local". Usado nas Configurações e na tela da fila.
-import { api, pickFile, pickFolder, toError, type ModelStatus } from '../api'
+import { api, pickFile, pickFolder, type ModelStatus } from '../api'
 import { t } from '../i18n'
 import { btnCls, describeError } from '../dialogs'
-import { isReady, refreshStatus, subscribe, tx } from '../tx'
-import { barHtml, esc, fmtBytes, toast } from '../util'
+import { isReady, refreshStatus, startSetup, subscribe, tx } from '../tx'
+import { barHtml, esc, fmtBytes, fmtClock, fmtDate, toast } from '../util'
 
 const MODELS: ModelStatus['id'][] = ['whisper', 'segmentation', 'embedding']
+/** "Detalhes" do motor desatualizado abertos (sobrevive aos redesenhos do cartão). */
+let detailsOpen = false
 
 function chip(text: string, tone: 'ok' | 'warn' | 'off') {
   const cls = tone === 'ok' ? 'bg-emerald-400/10 text-emerald-300' : tone === 'warn' ? 'bg-amber-400/10 text-amber-300' : 'bg-white/5 text-zinc-400'
@@ -54,9 +56,26 @@ export function mountSetup(el: HTMLElement): () => void {
         ? `<p data-msg class="mt-3 rounded-xl border border-amber-400/20 bg-amber-400/[0.04] px-3 py-2 text-sm text-amber-200">${esc(t('transcription.setup_cancelled'))}</p>`
         : `<p data-msg class="mt-3 rounded-xl border border-rose-400/30 bg-rose-400/[0.05] px-3 py-2 text-sm text-rose-200">${esc(t('transcription.setup_failed', { error: describeError(s.error) }))}</p>`)
       : s.ok ? `<p data-msg class="mt-3 rounded-xl border border-emerald-400/20 bg-emerald-400/[0.04] px-3 py-2 text-sm text-emerald-200">${esc(t('transcription.setup_done'))}</p>` : ''
+    const engineAction = !s.running && !st.fake_worker && (rt === 'outdated' || rt === 'missing')
+    const diffs = st.runtime.differences ?? []
+    const details = rt === 'outdated' && (diffs.length > 0 || st.runtime.installed_at) ? `<details data-details ${detailsOpen ? 'open' : ''} class="mt-2 text-sm">
+        <summary class="cursor-pointer text-xs text-zinc-500 hover:text-zinc-300">${esc(t('transcription.engine.details'))}</summary>
+        <ul class="mt-2 space-y-1 text-xs text-zinc-400">
+          ${st.runtime.installed_at ? `<li>${esc(t('transcription.engine.installed_at', { date: `${fmtDate(st.runtime.installed_at)} ${fmtClock(st.runtime.installed_at)}` }))}</li>` : ''}
+          ${diffs.map(d => `<li><span class="text-zinc-300">${esc(t(`transcription.engine.diff.${d.field}`))}</span>: <span class="font-mono">${esc(d.installed)}</span> → <span class="font-mono">${esc(d.expected)}</span></li>`).join('')}
+        </ul></details>` : ''
+    // frase com a consequência (fila parada) e a ação; o botão é o de sempre (`#setup-start`)
+    const engineMsg = !engineAction ? '' : rt === 'outdated'
+      ? `<p data-engine="outdated" class="mt-1 text-sm text-amber-200">${esc(t('transcription.engine.outdated'))}</p>
+         <p class="mt-1 text-xs text-zinc-500">${esc(t('transcription.engine.outdated_note'))}</p>${details}`
+      : `<p data-engine="missing" class="mt-1 text-sm text-amber-200">${esc(t('transcription.engine.missing'))}</p>
+         ${needed ? `<p class="mt-1 text-xs text-zinc-500">${esc(t('transcription.setup_body'))}</p>` : ''}`
+    const startLabel = partial || s.error?.code === 'setup_cancelled' ? t('transcription.setup_resume')
+      : rt === 'outdated' ? t('transcription.engine.update')
+      : rt === 'missing' ? t('transcription.engine.install') : t('transcription.setup_start')
     el.innerHTML = `<div id="tx-setup" class="rounded-2xl border ${ready ? 'border-white/10' : 'border-amber-400/25'} bg-ink-900/60 p-5">
-      <h2 class="text-sm font-semibold text-white">${esc(ready ? t('settings.transcription.runtime') : t('transcription.setup_title'))}</h2>
-      ${ready ? '' : `<p class="mt-1 text-sm text-zinc-400">${esc(t('transcription.setup_body'))}</p>`}
+      <h2 class="text-sm font-semibold text-white">${esc(ready || (rt === 'outdated' && !st.fake_worker) || engineAction ? t('settings.transcription.runtime') : t('transcription.setup_title'))}</h2>
+      ${ready ? '' : engineAction ? engineMsg : rt === 'outdated' && !st.fake_worker ? '' : `<p class="mt-1 text-sm text-zinc-400">${esc(t('transcription.setup_body'))}</p>`}
       <div class="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-white/10 bg-ink-950/50 px-4 py-2.5">
         <span class="min-w-0 flex-1 text-sm text-zinc-200">${esc(t('settings.transcription.runtime'))}${rt === 'ready' ? `<span class="ml-2 font-mono text-xs text-zinc-500">Python ${esc(st.runtime.python)}</span>` : ''}</span>
         ${chip(t(`transcription.runtime.${rt}`), runtimeTone)}</div>
@@ -67,18 +86,12 @@ export function mountSetup(el: HTMLElement): () => void {
       ${ready && !s.running ? '' : `<div class="mt-4 flex flex-wrap items-center gap-3">
         ${s.running
           ? `<button type="button" id="setup-cancel" class="${btnCls.btn}">${esc(t('transcription.setup_cancel'))}</button><span class="text-xs text-zinc-500">${esc(t('transcription.setup_running'))}</span>`
-          : `<button type="button" id="setup-start" class="${btnCls.btnPrimary}">${esc(partial || s.error?.code === 'setup_cancelled' ? t('transcription.setup_resume') : t('transcription.setup_start'))}</button>
+          : `<button type="button" id="setup-start" class="${btnCls.btnPrimary}">${esc(startLabel)}</button>
              ${needed ? `<span class="text-xs text-zinc-500">${esc(t('transcription.setup_size', { size: fmtBytes(needed) }))}</span>` : ''}`}
       </div>`}
     </div>`
-    el.querySelector('#setup-start')?.addEventListener('click', async () => {
-      Object.assign(tx.setup, { running: true, phase: 'runtime', step: null, index: null, of: null, error: null, ok: false })
-      draw()
-      try { await api.transcriptionSetupStart() }
-      catch (e) {
-        if (toError(e).code !== 'conflict') { tx.setup.running = false; tx.setup.error = toError(e); draw() }
-      }
-    })
+    el.querySelector('#setup-start')?.addEventListener('click', () => { void startSetup() })
+    el.querySelector('[data-details]')?.addEventListener('toggle', e => { detailsOpen = (e.target as HTMLDetailsElement).open })
     el.querySelector('#setup-cancel')?.addEventListener('click', () => { api.transcriptionSetupCancel().catch(e => toast(describeError(e), 'err')) })
     el.querySelectorAll<HTMLElement>('[data-local]').forEach(b => b.addEventListener('click', async () => {
       const id = b.dataset.local as ModelStatus['id']

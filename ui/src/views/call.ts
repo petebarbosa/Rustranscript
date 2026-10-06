@@ -23,6 +23,8 @@ interface Section { id: string; label: string; sub: string; blocks: BlockInfo[] 
 function sections(d: CallDetail): Section[] {
   const out: Section[] = []
   const chs = [...d.chapters].sort((a, b) => a.t - b.t)
+  // fim do último capítulo não passa da duração da chamada (sem duração: fim do último bloco) — #17
+  const total = d.duration_s > 0 ? d.duration_s : Math.max(0, ...d.blocks.map(b => b.t_end))
   for (const b of d.blocks) {
     let key: number, label: string, sub = ''
     if (chs.length) {
@@ -32,7 +34,7 @@ function sections(d: CallDetail): Section[] {
       sub = fmtTime(Math.max(key, 0))
     } else {
       key = Math.floor(b.t_start / BUCKET) * BUCKET
-      label = `${fmtTime(key)} – ${fmtTime(key + BUCKET)}`
+      label = `${fmtTime(key)} – ${fmtTime(Math.max(key, Math.min(key + BUCKET, total)))}`
     }
     const last = out[out.length - 1]
     if (!last || last.id !== `s-${key}`) out.push({ id: `s-${key}`, label, sub, blocks: [] })

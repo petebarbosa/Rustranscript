@@ -11,6 +11,7 @@ pub mod library;
 pub mod model;
 pub mod parse;
 pub mod paths;
+pub mod player;
 pub mod recording;
 pub mod rules;
 pub mod schema;

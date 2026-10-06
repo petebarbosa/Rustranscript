@@ -122,6 +122,12 @@ pub fn error_prefix(lang: Lang, code: &str) -> &'static str {
         ("no_audio", PtBr) => "a chamada não tem áudio",
         ("no_audio", EnUs) => "the call has no audio",
         ("no_audio", Es419) => "la llamada no tiene audio",
+        ("audio_deleted", PtBr) => "o áudio desta chamada foi apagado",
+        ("audio_deleted", EnUs) => "the audio of this call was deleted",
+        ("audio_deleted", Es419) => "el audio de esta llamada fue borrado",
+        ("not_transcribed", PtBr) => "a chamada ainda não foi transcrita",
+        ("not_transcribed", EnUs) => "the call has not been transcribed yet",
+        ("not_transcribed", Es419) => "la llamada aún no fue transcrita",
         ("oom", PtBr) => "memória insuficiente para transcrever",
         ("oom", EnUs) => "not enough memory to transcribe",
         ("oom", Es419) => "memoria insuficiente para transcribir",
@@ -270,7 +276,7 @@ mod tests {
     fn transcription_error_codes_are_translated() {
         let codes = [
             "runtime_missing", "runtime_outdated", "models_missing", "setup_failed", "setup_cancelled", "download_failed",
-            "checksum_mismatch", "worker_crashed", "worker_protocol", "audio_decode", "no_audio", "oom", "no_raw_data", "job_failed",
+            "checksum_mismatch", "worker_crashed", "worker_protocol", "audio_decode", "no_audio", "audio_deleted", "not_transcribed", "oom", "no_raw_data", "job_failed",
         ];
         for lang in LANGS {
             for code in codes {

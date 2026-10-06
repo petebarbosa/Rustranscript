@@ -11,7 +11,7 @@ use core_lib::rules::{ImportScope, RuleInput};
 use core_lib::transcription::params::JobOptions;
 use core_lib::transcription::queue::{self, JobKind, JobState, PauseReason};
 use core_lib::transcription::{keys, models, runtime};
-use core_lib::{App, ClientFilter, Error, Library, Origin, glossary, paths, search, transfer};
+use core_lib::{App, ClientFilter, Error, Library, Origin, glossary, paths, search, storage, transfer};
 use recorder::StreamChoice;
 use serde_json::{Value, json};
 
@@ -131,6 +131,11 @@ enum Cmd {
     },
     /// Originais já importados que ainda ocupam espaço
     Reclaimable,
+    /// Áudio das chamadas: o que ocupa espaço e como liberá-lo (a transcrição fica)
+    Audio {
+        #[command(subcommand)]
+        what: AudioCmd,
+    },
     /// Configurações (idioma, nome do "Eu", diretório de dados)
     Settings {
         #[command(subcommand)]
@@ -185,6 +190,20 @@ pub struct TranscribeArgs {
     /// Só mostra o que seria enfileirado
     #[arg(long)]
     dry_run: bool,
+}
+
+#[derive(Subcommand)]
+enum AudioCmd {
+    /// Chamadas que ainda têm áudio no disco, com o tamanho de cada uma (as maiores primeiro)
+    List,
+    /// Apaga o áudio (mic.flac, sys.flac e caches) de uma chamada já transcrita; a transcrição e o recording.json ficam. Irreversível
+    Delete {
+        /// Chave (call_AAAA-MM-DD_HH-MM-SS), nome do arquivo antigo ou <biblioteca>:<id>
+        call: String,
+        /// Só mostra o que seria apagado e quanto espaço liberaria
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -746,6 +765,34 @@ fn recording_now(sock: &std::path::Path) -> bool {
     call(sock, &Request::Status).is_ok_and(|s| s["state"] == "recording")
 }
 
+/// Chaves de gravações em curso ou sendo convertidas, segundo a app aberta (sem app: nenhuma).
+fn recording_keys(sock: &std::path::Path) -> Vec<String> {
+    let Ok(status) = call(sock, &Request::Status) else { return Vec::new() };
+    let live = status["recording"]["key"].as_str().map(str::to_string);
+    live.into_iter().chain(status["finalizing"].as_array().into_iter().flatten().filter_map(|k| k.as_str().map(str::to_string))).collect()
+}
+
+/// `audio list` / `audio delete <chamada> [--dry-run]`. Recusa chamada gravando, com tarefa de transcrição
+/// aberta ou ainda sem transcrição (ver `storage::delete_audio`).
+fn exec_audio(app: &App, cmd: AudioCmd, lang: Lang, sock: &std::path::Path) -> core_lib::Result<Output> {
+    match cmd {
+        AudioCmd::List => {
+            let entries = storage::list_audio(app)?;
+            let total: u64 = entries.iter().map(|e| e.bytes).sum();
+            Ok(Output::Json(json!({"total_bytes": total, "calls": entries}), None))
+        }
+        AudioCmd::Delete { call, dry_run } => {
+            let (library_id, call_id) = app.find_call(&call)?;
+            let r = storage::delete_audio(app, library_id, call_id, &recording_keys(sock), dry_run)?;
+            if dry_run {
+                Ok(Output::Json(json!({"dry_run": true, "message": i18n::msg(lang, "dry_run"), "result": to_json(r)?}), None))
+            } else {
+                Ok(Output::Json(to_json(r)?, changed(library_id, Some(call_id))))
+            }
+        }
+    }
+}
+
 /// Fila como a GUI a mostra: `paused` é o motivo que a GUI mostra (`pause_reason`: com os dois ao mesmo
 /// tempo vale `user`, que continua depois que a gravação acaba) e `paused_reasons` lista todos os
 /// motivos ativos (`["user", "recording"]`), para não esconder nenhum.
@@ -1052,6 +1099,7 @@ fn exec(app: &App, cmd: Cmd, lang: Lang, json_out: bool) -> core_lib::Result<Out
         Cmd::Transcribe(a) => exec_transcribe(app, a, lang, &sock(app)),
         Cmd::Queue { what } => exec_queue(app, what.unwrap_or(QueueCmd::List), lang, &sock(app)),
         Cmd::Setup { what } => exec_setup(app, what, lang),
+        Cmd::Audio { what } => exec_audio(app, what, lang, &sock(app)),
         Cmd::Reclaimable => {
             let files = import::reclaimable(app)?;
             let total: u64 = files.iter().map(|f| f.size).sum();
@@ -1397,6 +1445,50 @@ mod tests {
         assert_eq!(text(exec_bar(&app, BarCmd::Show, Lang::EnUs, false, &gui.sock)), "bar shown\n");
         let Output::Json(v, _) = exec_bar(&app, BarCmd::Hide, Lang::EnUs, true, &gui.sock).unwrap() else { panic!() };
         assert_eq!(v["state"], "idle");
+    }
+
+    /// `audio delete`: `--dry-run` não muda nada, recusa chamada que a app diz estar gravando, apaga de
+    /// verdade (avisa a app) e repetir não é erro.
+    #[test]
+    fn audio_delete_dry_run_recording_guard_and_idempotence() {
+        let (tmp, app) = setup();
+        let (lib_id, call_id) = app.find_call("call_2026-06-01_10-00-00").unwrap();
+        let lib = app.open_library(lib_id).unwrap();
+        // a chave que a app de mentira diz estar gravando
+        lib.conn
+            .execute("UPDATE calls SET key = 'call_2026-10-02_10-00-00', dir = 'call_x', mic_path = 'call_x/mic.flac' WHERE id = ?1", [call_id])
+            .unwrap();
+        let dir = lib.root().join("call_x");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mic.flac"), [0u8; 123]).unwrap();
+        std::fs::write(dir.join("recording.json"), b"{}").unwrap();
+        let gui = fake_gui(tmp.path());
+        let del = |dry_run| exec_audio(&app, AudioCmd::Delete { call: format!("{lib_id}:{call_id}"), dry_run }, Lang::EnUs, &gui.sock);
+        let json = |o: core_lib::Result<Output>| match o.unwrap() {
+            Output::Json(v, c) => (v, c),
+            Output::Text(_) => panic!("texto inesperado"),
+        };
+        let names = || std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect::<std::collections::BTreeSet<_>>();
+
+        exec_record(&app, rec_cmd(&["start", "--title", "T"]), Lang::EnUs, false, &gui.sock).unwrap();
+        assert_eq!(del(false).err().map(|e| e.code()), Some("conflict"), "gravando essa chamada");
+        assert_eq!(names().len(), 2);
+        exec_record(&app, RecordCmd::Stop, Lang::EnUs, false, &gui.sock).unwrap();
+
+        let (v, changed) = json(del(true));
+        assert_eq!((v["dry_run"].clone(), v["result"]["bytes"].clone(), changed), (json!(true), json!(123), None));
+        assert_eq!(names().len(), 2);
+
+        let (v, changed) = json(del(false));
+        assert_eq!((v["bytes"].clone(), v["already_deleted"].clone(), v["files"][0]["name"].clone()), (json!(123), json!(false), json!("mic.flac")));
+        assert_eq!(changed, super::changed(lib_id, Some(call_id)));
+        assert_eq!(names(), ["recording.json".to_string()].into());
+
+        let (v, _) = json(del(false));
+        assert_eq!((v["bytes"].clone(), v["already_deleted"].clone()), (json!(0), json!(true)));
+
+        let (list, _) = json(exec_audio(&app, AudioCmd::List, Lang::EnUs, &gui.sock));
+        assert_eq!((list["total_bytes"].clone(), list["calls"].clone()), (json!(0), json!([])));
     }
 
     /// `queue list` pergunta à app (fake) se há gravação: `recording`, `user` e os dois ao mesmo tempo.

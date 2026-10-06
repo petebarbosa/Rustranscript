@@ -3,7 +3,7 @@
 import { mockIPC } from '@tauri-apps/api/mocks'
 import { emit } from '@tauri-apps/api/event'
 import { TRANSCRIPTION_DEFAULTS } from './api'
-import type { ApplyReport, BleedRemoval, BlockChange, BlockInfo, BlocksChange, BlockSuggestion, CallDetail, ClientInfo, DeviceInfo, GlossaryImportEntry, HistoryEntry, Hit, JobInfo, JobKind, JobOptions, JobProgress, JobStage, LibraryInfo, LevelsEvent, ModelStatus, PauseReason, QueueStatus, Orphan, RecordingInfo, RecordStatus, Rule, SpeakerInfo, StreamChoice, StreamLevel, StreamStatus } from './api'
+import type { ApplyReport, AudioDeletion, AudioEntry, BleedRemoval, BlockChange, BlockInfo, BlocksChange, BlockSuggestion, CallDetail, ClientInfo, DeviceInfo, GlossaryImportEntry, HistoryEntry, Hit, JobInfo, JobKind, JobOptions, JobProgress, JobStage, LibraryInfo, LevelsEvent, ModelStatus, PauseReason, QueueStatus, Orphan, RecordingInfo, RecordStatus, Rule, SpeakerInfo, StreamChoice, StreamLevel, StreamStatus } from './api'
 
 type Args = Record<string, any>
 
@@ -817,7 +817,8 @@ const activeInfo = (c: Call) => c.transcripts.find(v => v.id === c.transcript_id
 
 function enqueue(libraryId: number, callId: number, kind: JobKind = 'full', options: JobOptions | null = null): JobInfo {
   const c = findCall(libraryId, callId)
-  if (!c.has_audio || c.audio.deleted_at || (!c.audio.mic_path && !c.audio.sys_path)) throw bad('no_audio', c.key)
+  if (c.audio.deleted_at) throw bad('audio_deleted', c.key)
+  if (!c.has_audio || (!c.audio.mic_path && !c.audio.sys_path)) throw bad('no_audio', c.key)
   if (openJob(c)) throw bad('conflict', 'call already has an open job')
   if (kind !== 'full' && !activeInfo(c)?.has_raw) throw bad('no_raw_data', c.key)
   const j: JobInfo = {
@@ -979,7 +980,34 @@ function txTick() {
     reason: (i === 2 ? 'energy_short' : 'text_and_energy') as BleedRemoval['reason'],
   })))
 }
+// ---- áudio das chamadas (#24; mesmas regras de `storage::delete_audio`)
+/** ~28 KB/s: as duas trilhas em FLAC, mais ~1% de cache de picos */
+const audioBytesOf = (c: Call) => Math.round(c.duration_s * 28_000)
+function audioPlan(c: Call, dryRun: boolean): AudioDeletion {
+  const gone = !!c.audio.deleted_at
+  if (rec.cur?.key === c.key) throw bad('conflict', `call ${c.key} is being recorded`)
+  if (openJob(c)) throw bad('conflict', `call ${c.key} has a transcription job queued or running`)
+  if (!gone && c.transcript_id == null) throw bad('not_transcribed', c.key)
+  const bytes = gone ? 0 : audioBytesOf(c)
+  const peaks = Math.round(bytes * 0.01)
+  const files: AudioDeletion['files'] = gone ? [] : [
+    { name: 'mic.flac', bytes: Math.round((bytes - peaks) * 0.4), kind: 'audio' },
+    { name: 'sys.flac', bytes: Math.round((bytes - peaks) * 0.6), kind: 'audio' },
+    { name: 'peaks.bin', bytes: peaks, kind: 'cache' },
+  ]
+  if (!dryRun && !gone) Object.assign(c, { has_audio: false, audio: { ...c.audio, deleted_at: now() } })
+  return { library_id: c.library_id, call_id: c.id, call_key: c.key, dry_run: dryRun, already_deleted: gone, files, bytes, deleted_at: c.audio.deleted_at }
+}
 Object.assign(handlers, {
+  audio_list: () => {
+    const list: AudioEntry[] = calls.filter(c => c.has_audio && !c.audio.deleted_at).map(c => ({
+      library_id: c.library_id, call_id: c.id, call_key: c.key, title: c.title,
+      client_name: clients.find(x => x.id === c.client_id)?.name ?? null, started_at: c.started_at, duration_s: c.duration_s,
+      bytes: audioBytesOf(c), blocked: c.transcript_id == null ? 'not_transcribed' as const : openJob(c) ? 'job_open' as const : null,
+    })).sort((a, b) => b.bytes - a.bytes)
+    return { total_bytes: list.reduce((n, e) => n + e.bytes, 0), calls: list }
+  },
+  audio_delete: (a: Args) => audioPlan(findCall(a.libraryId, a.callId), !!a.dryRun),
   transcription_status: () => txStatus(),
   transcription_setup_start: () => {
     if (setupRun) throw bad('conflict', 'setup already running')

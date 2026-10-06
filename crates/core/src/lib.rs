@@ -15,6 +15,7 @@ pub mod recording;
 pub mod rules;
 pub mod schema;
 pub mod search;
+pub mod storage;
 pub mod text;
 pub mod transcription;
 pub mod transfer;

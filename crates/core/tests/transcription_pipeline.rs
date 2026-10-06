@@ -863,13 +863,13 @@ fn the_informed_number_is_a_ceiling_and_the_merge_params_are_recorded() {
     e.enqueue(call, JobKind::Full, JobOptions { expected_speakers: Some(3), ..Default::default() });
     let (_, res) = e.run(&mut Rec(FakeEngine::new(), log.clone()));
     // padrões do #25: teto = o número informado; junção pela voz em 0,75 / 15 s
-    assert_eq!(log.lock().unwrap().clone(), vec![(Some(3), 0.75, 15.0)]);
+    assert_eq!(log.lock().unwrap().clone(), vec![(Some(3), 0.78, 15.0)]);
     let lib = e.lib();
     let raw: String = lib.conn.query_row("SELECT params_json FROM transcripts WHERE id = ?1", [done_id(&res)], |r| r.get(0)).unwrap();
     let d = serde_json::from_str::<serde_json::Value>(&raw).unwrap()["diarization"].clone();
     assert_eq!(d["max_speakers"], 3);
     assert_eq!(d["expected_speakers"], 3);
-    assert_eq!((d["merge_similarity"].as_f64(), d["min_speaker_s"].as_f64()), (Some(0.75), Some(15.0)));
+    assert_eq!((d["merge_similarity"].as_f64(), d["min_speaker_s"].as_f64()), (Some(0.78), Some(15.0)));
     assert_eq!((d["min_cluster_pct"].as_f64(), d["min_cluster_s"].as_f64()), (Some(0.0), Some(0.0)), "a regra dos 5 % saiu");
     assert_eq!(d["merge"], serde_json::json!({ "raw": 3, "final": 3 }));
 }

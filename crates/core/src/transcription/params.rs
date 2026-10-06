@@ -50,7 +50,7 @@ impl Default for Params {
             diarization_threshold: 0.9,
             min_cluster_pct: 0.0,
             min_cluster_s: 0.0,
-            merge_similarity: 0.75,
+            merge_similarity: 0.78,
             min_speaker_s: 15.0,
             bleed: BleedParams::default(),
         }
@@ -176,7 +176,7 @@ mod tests {
         assert_eq!(p.bleed, BleedParams::default());
         // #25: a regra por tempo (5 %) saiu do caminho padrão; quem junta é o worker, pela voz
         assert_eq!((p.min_cluster_pct, p.min_cluster_s), (0.0, 0.0));
-        assert_eq!((p.merge_similarity, p.min_speaker_s, p.diarization_threshold), (0.75, 15.0, 0.9));
+        assert_eq!((p.merge_similarity, p.min_speaker_s, p.diarization_threshold), (0.78, 15.0, 0.9));
 
         app.set_setting("transcription_language", Some("pt-BR")).unwrap();
         app.set_setting("transcription_beam_size", Some("99")).unwrap(); // inválido -> padrão
@@ -193,7 +193,7 @@ mod tests {
         app.set_setting("diarization_merge_similarity", Some("1.5")).unwrap(); // inválidos -> padrão
         app.set_setting("diarization_min_speaker_s", Some("-1")).unwrap();
         let p = Params::from_settings(&app, &JobOptions::default()).unwrap();
-        assert_eq!((p.merge_similarity, p.min_speaker_s), (0.75, 15.0));
+        assert_eq!((p.merge_similarity, p.min_speaker_s), (0.78, 15.0));
 
         let o = JobOptions { language: Some("auto".into()), bleed_filter: Some(false), bleed_margin_db: Some(20.0), diarization_threshold: Some(0.7), ..Default::default() };
         let p = Params::from_settings(&app, &o).unwrap();

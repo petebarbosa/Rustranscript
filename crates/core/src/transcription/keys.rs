@@ -24,7 +24,7 @@ pub const DIARIZATION_THRESHOLD: &str = "diarization_threshold";
 pub const DIARIZATION_MIN_CLUSTER_PCT: &str = "diarization_min_cluster_pct";
 /// ... ou menos de X segundos de fala. Padrão `0` (desligado).
 pub const DIARIZATION_MIN_CLUSTER_S: &str = "diarization_min_cluster_s";
-/// Cosseno mínimo entre centroides CAM++ para dois grupos serem a mesma pessoa (worker). Padrão `0.75`.
+/// Cosseno mínimo entre centroides CAM++ para dois grupos serem a mesma pessoa (worker). Padrão `0.78`.
 pub const DIARIZATION_MERGE_SIMILARITY: &str = "diarization_merge_similarity";
 /// Fala mínima (s) para um grupo virar pessoa; abaixo disso junta ao mais parecido (worker). Padrão `15`.
 pub const DIARIZATION_MIN_SPEAKER_S: &str = "diarization_min_speaker_s";

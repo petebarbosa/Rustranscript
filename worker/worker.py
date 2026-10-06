@@ -25,7 +25,7 @@ REQUESTS = ("transcribe", "diarize", "energy")
 SAMPLE_RATE = 16000
 REQUIRED = object()
 # junção de falantes pela voz (#25)
-MERGE_SIMILARITY = 0.75  # cosseno mínimo entre centroides para ser a mesma pessoa
+MERGE_SIMILARITY = 0.78  # cosseno mínimo entre centroides para ser a mesma pessoa
 MIN_SPEAKER_S = 15.0     # abaixo disso de fala o grupo não vira pessoa: junta ao mais parecido
 EMB_TURNS = 20           # turnos por grupo na amostra do centroide
 EMB_MIN_TURN_S = 1.0

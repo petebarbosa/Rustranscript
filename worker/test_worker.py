@@ -314,8 +314,8 @@ class MergeVoices(unittest.TestCase):
         self.assertEqual([row[1] for row in r["rows"]], [None, None])
 
     def test_threshold_is_inclusive(self):
-        self.assertEqual(self.merge([100.0, 40.0], [self.X, vec(0.75)])["kept"], 1)
-        self.assertEqual(self.merge([100.0, 40.0], [self.X, vec(0.74)])["kept"], 2)
+        self.assertEqual(self.merge([100.0, 40.0], [self.X, vec(0.78)])["kept"], 1)
+        self.assertEqual(self.merge([100.0, 40.0], [self.X, vec(0.77)])["kept"], 2)
         self.assertEqual(self.merge([100.0, 40.0], [self.X, vec(0.74)], merge_similarity=0.7)["kept"], 1)
 
     def test_small_cluster_merges_regardless_of_voice(self):
@@ -388,7 +388,7 @@ class ParseDiarizeRequest(unittest.TestCase):
 
     def test_defaults(self):
         p = self.parse()
-        self.assertEqual((p["max_speakers"], p["merge_similarity"], p["min_speaker_s"], p["threshold"]), (None, 0.75, 15.0, 0.9))
+        self.assertEqual((p["max_speakers"], p["merge_similarity"], p["min_speaker_s"], p["threshold"]), (None, 0.78, 15.0, 0.9))
 
     def test_new_fields(self):
         p = self.parse(max_speakers=6, merge_similarity=0.7, min_speaker_s=30, threshold=0.8)

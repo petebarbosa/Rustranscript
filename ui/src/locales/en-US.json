@@ -509,5 +509,13 @@
   "delete.done_other": "{n} passages deleted",
   "delete.undo": "Undo",
   "delete.restored_one": "1 passage restored",
-  "delete.restored_other": "{n} passages restored"
+  "delete.restored_other": "{n} passages restored",
+  "player.play": "Play",
+  "player.pause": "Pause",
+  "player.speed": "Playback speed",
+  "player.follow": "Follow the transcript while playing",
+  "player.seek": "Audio position",
+  "player.error": "Could not play the audio: {error}",
+  "player.unreadable": "Could not open this call's audio: {error}",
+  "player.missing": "This call's audio files were not found."
 }

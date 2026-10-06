@@ -90,6 +90,15 @@ const calls: Call[] = [
 // uma chamada gravada e ainda sem transcrição, para ver o selo/estado vazio em qualquer idioma sem gravar
 calls.push(mkPending(1, 4, 'call_2026-03-03_09-00-00', '', null, 754, { expected_speakers: 3, language: 'pt' }))
 
+// sem áudio: importada só do texto (nenhuma trilha) e com o áudio apagado (`audio_deleted_at`); a tela não mostra o player
+{
+  const noAudio = mkCall(1, 6, 'call_2026-02-27_16-00-00', 'Importada sem áudio', null, [[4, 'Outros', 'Esta chamada veio só do texto.'], [20, 'Eu', 'Sem trilha de áudio para tocar.']])
+  Object.assign(noAudio, { has_audio: false, audio: { mic_path: null, sys_path: null, deleted_at: null } })
+  const gone = mkCall(1, 7, 'call_2026-02-26_11-00-00', 'Áudio apagado', null, [[4, 'Outros', 'O áudio desta chamada foi apagado.'], [20, 'Eu', 'O texto continua aqui.']])
+  Object.assign(gone, { has_audio: false, audio: { mic_path: null, sys_path: null, deleted_at: '2026-03-01T10:00:00' } })
+  calls.push(noAudio, gone)
+}
+
 addVersion(calls[0], 'large-v3', [
   [2, 'Outros', 'Bom dia, vamos começar pelo serviço que caiu ontem (segunda versão).'],
   [15, 'Eu', 'Eu olhei os logs, foi timeout no gateway de pagamento.'],
@@ -1032,6 +1041,62 @@ Object.assign(handlers, {
   },
   bleed_removals: (a: Args) => structuredClone(bleedBy.get(a.transcriptId) ?? []),
 })
+
+// ---- player de áudio (issue #22): relógio falso; o som de verdade é do Rust (PulseAudio)
+const pl = { lib: 0, call: 0, dur: 0, pos: 0, playing: false, speed: 1, since: 0, ended: false, tick: 0 as ReturnType<typeof setInterval> | 0 }
+const plPos = () => Math.min(pl.dur, pl.playing ? pl.pos + ((Date.now() - pl.since) / 1000) * pl.speed : pl.pos)
+function plEmit() {
+  if (pl.playing && plPos() >= pl.dur) { pl.pos = pl.dur; pl.playing = false; pl.ended = true }
+  void emit('player-position', {
+    library_id: pl.lib, call_id: pl.call, state: pl.playing ? 'playing' : pl.ended ? 'ended' : 'paused',
+    position_s: plPos(), duration_s: pl.dur, speed: pl.speed, error: null,
+  })
+  if (!pl.playing && pl.tick) { clearInterval(pl.tick); pl.tick = 0 }
+}
+/** Fixa a posição de agora antes de mudar o estado (como o motor faz com `settle`). */
+const plSettle = () => { pl.pos = plPos(); pl.since = Date.now() }
+const plStop = () => { if (pl.tick) clearInterval(pl.tick); pl.tick = 0; pl.playing = false; pl.lib = 0 }
+/** Onda sintética: trechos de fala (envelope suave com ruído determinístico) e pausas curtas entre eles. */
+function mockPeaks(dur: number, n: number): number[] {
+  let x = 12345
+  const rnd = () => ((x = (x * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff)
+  return Array.from({ length: n }, (_, i) => {
+    const sec = (i / n) * dur
+    const phrase = 0.5 + 0.5 * Math.sin(sec / 3.1) * Math.sin(sec / 11.7 + 1)
+    const gap = Math.sin(sec / 7.3) > 0.82 ? 0.12 : 1
+    return Math.round(Math.min(255, (30 + 190 * phrase * gap) * (0.55 + 0.45 * rnd())))
+  })
+}
+const playerHandlers: Record<string, (a: Args) => unknown> = {
+  player_open: a => {
+    const c = findCall(a.libraryId, a.callId)
+    plStop()
+    if (c.audio.deleted_at) return { available: false, reason: 'deleted', duration_s: 0 }
+    if (!c.has_audio || (!c.audio.mic_path && !c.audio.sys_path)) return { available: false, reason: 'none', duration_s: 0 }
+    Object.assign(pl, { lib: a.libraryId, call: a.callId, dur: c.duration_s, pos: 0, speed: 1, ended: false })
+    return { available: true, reason: null, duration_s: c.duration_s }
+  },
+  player_peaks: async a => {
+    const c = findCall(a.libraryId, a.callId)
+    await sleep(flags.has('slowpeaks') ? 2500 : 120)
+    return { per_s: 50, duration_s: c.duration_s, data: mockPeaks(c.duration_s, Math.min(20000, Math.max(1, a.buckets))) }
+  },
+  player_play: () => {
+    if (!pl.lib) throw bad('invalid', 'no call is open in the player')
+    if (pl.ended) { pl.pos = 0; pl.ended = false }
+    plSettle(); pl.playing = true
+    if (!pl.tick) pl.tick = setInterval(plEmit, 100)
+    plEmit()
+  },
+  player_pause: () => { if (!pl.lib) throw bad('invalid', 'no call is open in the player'); plSettle(); pl.playing = false; plEmit() },
+  player_seek: a => {
+    if (!pl.lib) throw bad('invalid', 'no call is open in the player')
+    pl.pos = Math.min(pl.dur, Math.max(0, a.seconds)); pl.since = Date.now(); pl.ended = false; plEmit()
+  },
+  player_speed: a => { if (!pl.lib) throw bad('invalid', 'no call is open in the player'); plSettle(); pl.speed = Math.min(2, Math.max(1, a.speed)); plEmit() },
+  player_close: a => { if (pl.lib && (a.libraryId == null || a.libraryId === pl.lib) && (a.callId == null || a.callId === pl.call)) plStop() },
+}
+Object.assign(handlers, playerHandlers)
 
 const startTxSim = () => { setInterval(txTick, 400) }
 

@@ -5,6 +5,7 @@ import { assignDialog, btnCls, confirmDialog, describeError, describeGlossaryErr
 import { cancelJob, enqueueCall, isReady, jobError, jobForCall, jobProgress, retryJob, stageText, subscribe as subscribeTx, tx } from '../tx'
 import { barHtml, callTitle, diffWords, esc, fmtClock, fmtDate, fmtDuration, fmtNumber, fmtTime, fold, speakerDefault, speakerName, toast, toastAction } from '../util'
 import { caseBadge, readRule, ruleFields, ruleText, syncKind } from '../rules'
+import { createPlayer, type PlayerCtl } from '../player'
 
 // (rótulo, balão) para quem não é o microfone
 const PALETTE = [
@@ -48,6 +49,10 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
   const dismissed = new Set<number>()
   let io: IntersectionObserver | null = null
   let ro: ResizeObserver | null = null
+  /** Player de áudio (issue #22): vive fora do DOM, que `draw()` refaz; a barra é reanexada ao dock a cada desenho. */
+  let player: PlayerCtl | null = null
+  /** Por que não há player (linha discreta sob o cabeçalho); null = tem áudio, ou ainda se descobrindo. */
+  let audioNote: string | null = null
 
   const speakerById = () => new Map(d.speakers.map(s => [s.id, s]))
   const styleFor = (s: SpeakerInfo | undefined, order: Map<number, number>): string[] => {
@@ -183,6 +188,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
             <button type="button" id="redo-btn" class="${pill}">${esc(t('call.redo'))}</button></span>`}
         </div>
         <div id="job-strip" class="mt-2 empty:hidden">${jobStripHtml()}</div>
+        ${audioNote && !pending ? `<p id="player-note" class="mt-2 text-xs text-zinc-500">${esc(audioNote)}</p>` : ''}
         <div class="mt-3 flex flex-wrap items-center gap-2">
           <div class="relative min-w-[14rem] flex-1" ${pending ? 'hidden' : ''}>
             <input id="q" type="search" autocomplete="off" placeholder="${esc(t('call.search'))}"
@@ -207,12 +213,14 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
       <main id="blocks" class="group/sel min-w-0">${pending ? pendingHtml() : `${body}
         <p class="mt-14 text-center text-xs text-zinc-700">${esc(t('call.end'))}</p>`}</main>
     </div>
-    ${pending ? '' : `<div id="select-bar" hidden class="sticky bottom-4 z-30 mx-auto mb-4 flex w-fit max-w-[calc(100%-2rem)] flex-wrap items-center justify-center gap-x-3 gap-y-2 rounded-2xl border border-violet-400/30 bg-ink-900/95 px-4 py-2.5 shadow-2xl backdrop-blur-md">
+    <div id="dock" class="@container pointer-events-none sticky bottom-0 z-30 px-6 pb-4">
+    ${pending ? '' : `<div id="select-bar" hidden class="pointer-events-auto mx-auto mb-3 flex w-fit max-w-[calc(100%-2rem)] flex-wrap items-center justify-center gap-x-3 gap-y-2 rounded-2xl border border-violet-400/30 bg-ink-900/95 px-4 py-2.5 shadow-2xl backdrop-blur-md">
       <span id="select-count" aria-live="polite" class="min-w-[6.5rem] text-sm font-medium text-white"></span>
       <button type="button" data-sel="all" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/5 hover:text-zinc-100">${esc(t('select.all'))}</button>
       <button type="button" data-sel="none" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/5 hover:text-zinc-100">${esc(t('select.none'))}</button>
       <button type="button" id="select-delete" data-sel="delete" class="rounded-xl border border-rose-400/50 bg-rose-500/15 px-4 py-2 text-sm font-medium text-rose-100 hover:bg-rose-500/25 disabled:cursor-not-allowed disabled:opacity-40">${esc(t('delete.action'))}</button>
-      <button type="button" data-sel="cancel" class="${btnCls.btn}">${esc(t('common.cancel'))}</button></div>`}`
+      <button type="button" data-sel="cancel" class="${btnCls.btn}">${esc(t('common.cancel'))}</button></div>`}</div>`
+    if (player) el.querySelector('#dock')!.append(player.el)
     ro?.disconnect()
     const header = el.querySelector('header')!
     const syncHeader = () => el.style.setProperty('--hdr', getComputedStyle(header).position === 'sticky' ? `${header.offsetHeight}px` : '0px')
@@ -221,6 +229,8 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     ro.observe(header); ro.observe(el)
     bind()
     paintSelect()
+    indexStarts()
+    paintPlaying(false)
     if (keepScroll) el.scrollTop = scroll
   }
 
@@ -374,6 +384,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     d = await api.callDetail(libraryId, callId)
     await loadBleed()
     editor = null
+    syncAudio()
     draw(keepScroll)
     runSearch()
     const kb = keep && el.querySelector<HTMLElement>(`[data-block="${keep.id}"]`)
@@ -818,6 +829,71 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     else if (r === 'apply') await applyGlossary()
   }
 
+  // ------------------------------------------------------------ player de áudio (issue #22)
+  const noAudioReason = (): 'deleted' | 'none' | null => (d.audio.deleted_at ? 'deleted' : !d.audio.mic_path && !d.audio.sys_path ? 'none' : null)
+  const noteFor = (why: string, error = '') => (why === 'deleted' ? t('call.audio_deleted') : why === 'none' ? t('call.audio_none') : why === 'missing' ? t('player.missing') : t('player.unreadable', { error }))
+  /** Os trechos em ordem de início (busca binária por posição); refeito a cada `draw()`, que recria o DOM. */
+  let starts: { t: number; id: number }[] = []
+  let playingId: number | null = null
+  const indexStarts = () => { starts = d.blocks.map(b => ({ t: b.t_start, id: b.id })).sort((a, b) => a.t - b.t) }
+
+  /** O trecho que está tocando em `s`: o último que já começou (folga de 50 ms para o arredondamento do tempo). */
+  function blockAt(s: number): number | null {
+    let lo = 0, hi = starts.length
+    while (lo < hi) { const m = (lo + hi) >> 1; if (starts[m].t <= s + 0.05) lo = m + 1; else hi = m }
+    return lo ? starts[lo - 1].id : null
+  }
+
+  /** Destaca o trecho tocando (só troca um atributo, sem refazer a página); com `follow`, rola até ele se saiu da tela. */
+  function paintPlaying(scroll = true) {
+    const id = player ? blockAt(player.position()) : null
+    if (!scroll) playingId = null
+    if (id === playingId) return
+    playingId = id
+    el.querySelectorAll('[data-playing]').forEach(b => b.removeAttribute('data-playing'))
+    const b = id == null ? null : el.querySelector<HTMLElement>(`#b-${id}`)
+    b?.setAttribute('data-playing', '')
+    if (scroll && b && player?.follow() && !b.hidden) followBlock(b)
+  }
+
+  function followBlock(b: HTMLElement) {
+    const box = el.getBoundingClientRect(), r = b.getBoundingClientRect()
+    const top = box.top + (parseFloat(el.style.getPropertyValue('--hdr')) || 0) + 48
+    const bottom = box.bottom - (el.querySelector('#dock')?.getBoundingClientRect().height ?? 0) - 8
+    if (r.top < top || r.bottom > bottom) b.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }
+
+  /** Abre o player no Rust e mostra a barra; sem áudio mostra só a linha que explica. Uma vez por abertura da tela. */
+  async function startPlayer() {
+    const why = noAudioReason()
+    if (why) { audioNote = noteFor(why); paintNote(); return }
+    try {
+      const info = await api.playerOpen(libraryId, callId)
+      if (!alive) { void api.playerClose(libraryId, callId); return } // saiu da tela enquanto abria
+      if (!info.available) { audioNote = noteFor(info.reason ?? 'none'); paintNote(); return }
+      player = createPlayer({ libraryId, callId, duration: info.duration_s, onPosition: () => paintPlaying() })
+      el.querySelector('#dock')?.append(player.el)
+    } catch (e) {
+      if (alive) { audioNote = noteFor('unreadable', describeError(e)); paintNote() }
+    }
+  }
+
+  /** A linha "sem áudio" sem refazer a página (as chamadas pendentes já dizem isso no próprio estado). */
+  function paintNote() {
+    el.querySelector('#player-note')?.remove()
+    if (!audioNote || noTranscript()) return
+    el.querySelector('#job-strip')?.insertAdjacentHTML('afterend', `<p id="player-note" class="mt-2 text-xs text-zinc-500">${esc(audioNote)}</p>`)
+  }
+
+  /** O áudio sumiu (apagado por outra tela): fecha o player, que ainda tem os arquivos abertos, e explica. */
+  function syncAudio() {
+    const why = noAudioReason()
+    if (!why || !player) return
+    player.dispose()
+    player = null
+    audioNote = noteFor(why)
+  }
+
   function bind() {
     $('#q').addEventListener('input', runSearch)
     $('#title-edit').addEventListener('click', editTitle)
@@ -874,6 +950,12 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     const sb = selecting ? target.closest<HTMLElement>('[data-block]') : null
     if (sb && target === sb && (e.key === ' ' || e.key === 'Enter')) { e.preventDefault(); toggleSelect(sb, e.shiftKey); return }
     if (target.matches('input, textarea, select')) return
+    // espaço toca/pausa, menos em campo de texto, no editor de trecho ou sobre um controle que já usa o espaço
+    if (e.key === ' ' && player && !editor && !e.ctrlKey && !e.metaKey && !e.altKey && !target.closest('button, a, summary, canvas, [contenteditable], [role="checkbox"]')) {
+      e.preventDefault()
+      if (!e.repeat) player.toggle()
+      return
+    }
     if (e.key === '/') { e.preventDefault(); q.focus() }
     if (e.key === 'Escape') { q.value = ''; runSearch(); q.blur() }
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') { e.preventDefault(); undo() }
@@ -908,7 +990,14 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     const sb = target.closest('[data-speaker-btn]')
     if (sb && sb.closest('[data-editing]')) { void speakerMenu(sb.closest<HTMLElement>('[data-block]')!); return }
     const anchor = target.closest<HTMLAnchorElement>('[data-anchor]')
-    if (anchor) { e.preventDefault(); history.replaceState(null, '', anchor.getAttribute('href')); flash(Number(anchor.closest<HTMLElement>('[data-block]')!.dataset.block)) }
+    if (anchor) {
+      e.preventDefault()
+      history.replaceState(null, '', anchor.getAttribute('href'))
+      const ab = anchor.closest<HTMLElement>('[data-block]')!
+      // com player: o tempo do trecho pula o áudio para ali e toca; sem áudio, só leva ao trecho como antes
+      if (player) player.seek(blockData(ab).t_start, true)
+      else flash(Number(ab.dataset.block))
+    }
   }
   const flash = (id: number) => {
     const b = el.querySelector<HTMLElement>(`#b-${id}`)
@@ -937,6 +1026,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
   ]
 
   draw()
+  void startPlayer()
   if (params.get('glossary')) { history.replaceState(null, '', location.hash.split('?')[0]); void glossaryDialog() } // volta do "Classificar" do modal
   const target = Number(params.get('b'))
   const q = params.get('q')
@@ -949,6 +1039,8 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     leave,
     dispose: () => {
       alive = false
+      player?.dispose()
+      player = null
       offs.forEach(f => f())
       io?.disconnect()
       ro?.disconnect()

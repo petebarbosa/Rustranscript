@@ -509,5 +509,13 @@
   "delete.done_other": "{n} trechos excluídos",
   "delete.undo": "Desfazer",
   "delete.restored_one": "1 trecho restaurado",
-  "delete.restored_other": "{n} trechos restaurados"
+  "delete.restored_other": "{n} trechos restaurados",
+  "player.play": "Tocar",
+  "player.pause": "Pausar",
+  "player.speed": "Velocidade de reprodução",
+  "player.follow": "Acompanhar a transcrição enquanto toca",
+  "player.seek": "Posição no áudio",
+  "player.error": "O áudio não pôde ser tocado: {error}",
+  "player.unreadable": "Não foi possível abrir o áudio desta chamada: {error}",
+  "player.missing": "Os arquivos de áudio desta chamada não foram encontrados."
 }

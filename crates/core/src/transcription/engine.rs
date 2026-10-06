@@ -271,6 +271,7 @@ impl ProcessEngine {
             cmd.arg("--fake");
         }
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::from(log));
+        super::host_env(&mut cmd);
         cmd.env("HF_HUB_OFFLINE", "1").env("PYTHONUNBUFFERED", "1").env("PYTHONIOENCODING", "utf-8");
         cmd.process_group(0);
         let parent = unsafe { libc::getpid() };

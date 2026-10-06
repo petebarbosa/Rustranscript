@@ -170,6 +170,7 @@ fn log_tail(log: &Path) -> String {
 fn run(program: &Path, args: &[&std::ffi::OsStr], env: &[(&str, &Path)], log: &Path, cancel: &AtomicBool) -> Result<()> {
     let out = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
     let mut cmd = Command::new(program);
+    super::host_env(&mut cmd);
     cmd.args(args)
         .env("UV_LINK_MODE", "copy")
         .env("UV_NO_CONFIG", "1")
@@ -224,8 +225,10 @@ pub fn ensure(data_dir: &Path, on_progress: &mut dyn FnMut(&RuntimeProgress), ca
     let result = (|| -> Result<()> {
         // 1. uv: reaproveita o que já roda na versão certa; senão baixa e confere o sha256 do pacote
         begin(on_progress)?;
+        let mut uv_version = Command::new(&p.uv);
+        super::host_env(&mut uv_version);
         let uv_ok = p.uv.is_file()
-            && Command::new(&p.uv).arg("--version").output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(UV_VERSION));
+            && uv_version.arg("--version").output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(UV_VERSION));
         if !uv_ok {
             let _ = std::fs::remove_file(&p.uv);
             let item = models::Item {

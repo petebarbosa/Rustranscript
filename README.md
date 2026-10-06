@@ -41,6 +41,10 @@ Recording works without it, and finished recordings wait in the queue.
 Your microphone and the other side of the call are recorded separately, which
 is how speakers are told apart.
 
+## Agent skill
+
+To let a coding agent drive the app, symlink the skill: `ln -s "$PWD/skills/rstt" ~/.claude/skills/rstt` (or into `~/.agents/skills/`).
+
 ## Where your data lives
 
 `~/.local/share/rustranscript` holds recordings, transcripts and the

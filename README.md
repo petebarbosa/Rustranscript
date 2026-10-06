@@ -3,9 +3,44 @@
 Records your calls, transcribes them and tells the speakers apart. Everything
 happens on your machine: audio and text never leave your computer.
 
-*Em português: o app também tem interface em pt-BR (Configurações > Idioma).*
+Linux only (PulseAudio or PipeWire). The interface comes in English, Brazilian
+Portuguese and Latin-American Spanish (Settings > Language).
 
-Linux only (PulseAudio or PipeWire).
+![The call library: calls grouped by day, with the companies and clients sidebar](docs/screenshots/01-library.png)
+
+## Features
+
+- **Record with one shortcut.** Press a key (or run `tary record toggle`) to
+  start and stop. Your microphone and the other side of the call are recorded
+  separately, which is how speakers are told apart.
+- **Local transcription with speaker separation.** Transcripts are labeled by
+  speaker. Nothing is sent to any service.
+- **Libraries and clients.** File calls under companies/projects and clients,
+  and search across all transcripts.
+- **Audio player synced with the transcript.** Click a passage to jump to it,
+  see the waveform, and speed playback up to 1.5x or 2x without changing the
+  pitch.
+- **Edit and clean up.** Edit passages, delete one or several at once, and undo
+  from the history. Every change is logged and reversible.
+- **Audio cuts.** Mark parts of the audio to skip, such as off-topic tangents.
+  The player skips them and re-transcription ignores them. The original audio
+  files are never modified.
+- **Per-client glossary.** Terms and "wrong -> right" corrections, global or per
+  client, applied to the transcripts.
+- **Free disk space.** Delete a call's audio and keep its transcript.
+- **Command line and agent skill.** The `tary` command and
+  [`skills/tary/SKILL.md`](skills/tary/SKILL.md) let you, or an AI agent, record,
+  search and edit transcripts.
+
+![A transcript with the audio player: the waveform shows a cut as a hatched region](docs/screenshots/02-transcript-player.png)
+
+![Selecting passages to delete several at once](docs/screenshots/03-select-delete.png)
+
+![A client's glossary: replacements and terms](docs/screenshots/04-glossary.png)
+
+![Settings, Call audio: delete the audio of transcribed calls to free space](docs/screenshots/05-free-audio-space.png)
+
+The screenshots use synthetic data.
 
 ## Install
 
@@ -38,9 +73,6 @@ Recording works without it, and finished recordings wait in the queue.
   **Settings**, copy the snippet shown there into your compositor config, and
   it will call `tary record toggle`.
 
-Your microphone and the other side of the call are recorded separately, which
-is how speakers are told apart.
-
 ## Agent skill
 
 To let a coding agent drive the app, symlink the skill: `ln -s "$PWD/skills/tary" ~/.claude/skills/tary` (or into `~/.agents/skills/`).
@@ -49,6 +81,18 @@ To let a coding agent drive the app, symlink the skill: `ln -s "$PWD/skills/tary
 
 `~/.local/share/transcriptary` holds recordings, transcripts and the
 transcription engine. Remove the folder to erase everything.
+
+## Roadmap
+
+Open work, tracked in [GitHub Issues](https://github.com/petebarbosa/Transcriptary/issues):
+
+- [#19](https://github.com/petebarbosa/Transcriptary/issues/19) Explain the transcription queue and environment states, and offer actions for each.
+- [#17](https://github.com/petebarbosa/Transcriptary/issues/17) Bug: call navigation shows a 5-minute chapter for very short calls.
+- [#16](https://github.com/petebarbosa/Transcriptary/issues/16) Bug: translate the CLI status and the default recording titles.
+- [#15](https://github.com/petebarbosa/Transcriptary/issues/15) Hide the recording bar during screen sharing.
+- [#12](https://github.com/petebarbosa/Transcriptary/issues/12) Verify the Arch PKGBUILD with a full source build.
+- [#11](https://github.com/petebarbosa/Transcriptary/issues/11) Calibrate glossary hotwords and the speaker threshold with new calls.
+- [#5](https://github.com/petebarbosa/Transcriptary/issues/5) Your own voice leaking into the system audio shows up as an extra speaker.
 
 ## Build from source
 

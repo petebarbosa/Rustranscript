@@ -951,7 +951,8 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     if (sb && target === sb && (e.key === ' ' || e.key === 'Enter')) { e.preventDefault(); toggleSelect(sb, e.shiftKey); return }
     if (target.matches('input, textarea, select')) return
     // espaço toca/pausa, menos em campo de texto, no editor de trecho ou sobre um controle que já usa o espaço
-    if (e.key === ' ' && player && !editor && !e.ctrlKey && !e.metaKey && !e.altKey && !target.closest('button, a, summary, canvas, [contenteditable], [role="checkbox"]')) {
+    // (links e a onda ficam de fora da lista: clicar no tempo de um trecho ou na onda deixa o foco neles)
+    if (e.key === ' ' && player && !editor && !e.ctrlKey && !e.metaKey && !e.altKey && !target.closest('button, summary, [contenteditable], [role="checkbox"]')) {
       e.preventDefault()
       if (!e.repeat) player.toggle()
       return

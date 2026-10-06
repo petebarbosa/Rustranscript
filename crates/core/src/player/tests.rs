@@ -539,3 +539,89 @@ fn long_call_peaks_and_seek_stay_cheap() {
     let t = started.elapsed();
     assert!(t < Duration::from_secs(60), "{t:?}");
 }
+
+// ---------------------------------------------------------------- resolver o áudio de uma chamada (banco + disco)
+
+/// Chamada na caixa de entrada de uma biblioteca temporária, como a gravação a deixa: `<key>/mic.flac` e `sys.flac`.
+fn insert_call(lib: &crate::Library, key: &str, mic: Option<&str>, sys: Option<&str>, deleted: bool) -> i64 {
+    lib.conn
+        .execute(
+            "INSERT INTO calls (key, title, slug, started_at, duration_s, dir, mic_path, sys_path, audio_deleted_at, created_at)
+             VALUES (?1, 'Tom', '', '2026-10-02T09:00:00', 20, ?1, ?2, ?3, ?4, '2026-10-02T09:00:20')",
+            rusqlite::params![key, mic, sys, deleted.then_some("2026-10-03T10:00:00")],
+        )
+        .unwrap();
+    lib.call_id_by_key(key).unwrap().unwrap()
+}
+
+fn sidecar(key: &str, mic_first_ms: i64, sys_first_ms: i64) -> recorder::Sidecar {
+    let stream = |file: &str, first: i64| recorder::StreamMeta {
+        file: file.into(),
+        device: "dev".into(),
+        description: "Dev".into(),
+        is_monitor: false,
+        first_sample_unix_ms: Some(first),
+        first_read_unix_ms: Some(first),
+        latency_ms: None,
+        fragment_ms: 100,
+        samples: 0,
+        cuts: vec![],
+        reconnects: 0,
+    };
+    recorder::Sidecar {
+        schema: recorder::sidecar::SCHEMA,
+        state: recorder::State::Complete,
+        key: key.into(),
+        app_version: "0".into(),
+        started_at: "2026-10-02T09:00:00".into(),
+        started_unix_ms: 1,
+        ended_at: None,
+        duration_s: None,
+        sample_rate: RATE,
+        channels: 1,
+        format: "s16le".into(),
+        mic: Some(stream("mic.wav", mic_first_ms)),
+        sys: Some(stream("sys.wav", sys_first_ms)),
+        extra: serde_json::json!({}),
+    }
+}
+
+#[test]
+fn resolve_tells_apart_deleted_none_missing_and_playable_calls() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = crate::App::open(&tmp.path().join("data")).unwrap();
+    let lib = app.open_library(app.inbox_id().unwrap()).unwrap();
+    let why = |id| match super::source::resolve(&lib, id).unwrap() {
+        Ok(_) => "ok",
+        Err(w) => w.code(),
+    };
+
+    // apagado: mesmo com os caminhos e os arquivos ainda lá, o marcador manda
+    let key = "call_2026-10-02_09-00-01";
+    std::fs::create_dir_all(lib.root().join(key)).unwrap();
+    flac(&lib.root().join(key), "sys", &tone(440.0, 0.3, 8_000));
+    assert_eq!(why(insert_call(&lib, key, None, Some(&format!("{key}/sys.flac")), true)), "deleted");
+    // importada sem trilhas
+    assert_eq!(why(insert_call(&lib, "call_2026-10-02_09-00-02", None, None, false)), "none");
+    // trilhas registradas, arquivos fora do disco
+    assert_eq!(why(insert_call(&lib, "call_2026-10-02_09-00-03", Some("x/mic.flac"), Some("x/sys.flac"), false)), "missing");
+    assert_eq!(super::source::resolve(&lib, 9_999).unwrap_err().code(), "not_found");
+
+    // tocável: as duas trilhas e o sidecar (mic começou 250 ms depois do sys)
+    let key = "call_2026-10-02_09-00-04";
+    let dir = lib.root().join(key);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (sys, mic) = (flac(&dir, "sys", &tone(440.0, 0.3, 16_000)), flac(&dir, "mic", &tone(880.0, 0.3, 16_000)));
+    sidecar(key, 1_250, 1_000).write(&dir).unwrap();
+    let id = insert_call(&lib, key, Some(&format!("{key}/mic.flac")), Some(&format!("{key}/sys.flac")), false);
+    let audio = super::source::resolve(&lib, id).unwrap().unwrap();
+    assert_eq!((audio.sys.as_deref(), audio.mic.as_deref()), (Some(sys.as_path()), Some(mic.as_path())));
+    assert_eq!(audio.dir, dir);
+    assert!((audio.mic_offset_s - 0.25).abs() < 1e-9, "{}", audio.mic_offset_s);
+    // com uma trilha só o deslocamento não vale (não há com o que alinhar)
+    std::fs::remove_file(&mic).unwrap();
+    let audio = super::source::resolve(&lib, id).unwrap().unwrap();
+    assert!(audio.mic.is_none() && audio.mic_offset_s == 0.0);
+    // e o mixer abre o que foi resolvido
+    assert_eq!(audio.open_mixer().unwrap().len(), 16_000);
+}

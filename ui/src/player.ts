@@ -192,11 +192,12 @@ export function createPlayer(o: Opts): PlayerCtl {
     if (sp) {
       const v = Number(sp.dataset.speed)
       speed = v
+      sp.blur() // o foco não fica no botão: o espaço seguinte toca/pausa em vez de apertá-lo de novo
       paint()
       api.playerSpeed(v).catch(fail)
       return
     }
-    if (target.closest('[data-p="follow"]')) { follow = !follow; saveFollow(follow); paint() }
+    if (target.closest('[data-p="follow"]')) { follow = !follow; saveFollow(follow); followBtn.blur(); paint() }
   })
 
   // a onda segue a largura da barra

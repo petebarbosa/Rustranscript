@@ -323,8 +323,6 @@ export const api = {
     call<GlossaryImportReport>('glossary_import_file', {
       path: a.path, scope: a.scope, libraryId: a.libraryId ?? null, clientId: a.clientId ?? null, kind: a.kind ?? null, dryRun: a.dryRun,
     }),
-  glossarySuggestions: (libraryId: number, blockId: number, oldText: string, newText: string) =>
-    call<BlockSuggestion[]>('glossary_suggestions', { libraryId, blockId, oldText, newText }),
   glossaryPromptTerms: (libraryId: number, clientId: number | null) =>
     call<PromptTerms>('glossary_prompt_terms', { libraryId, clientId }),
   // ---- gravação

@@ -331,6 +331,15 @@ function merged(libraryId: number | null, clientId: number | null): Rule[] {
   return [...own.map(r => ({ ...r })), ...globals.map(r => ({ ...r, overridden: keys.has(rkey(r)) }))]
 }
 
+// regras sintéticas de partida: o Cliente Alfa tem as suas (a chamada 3 dá prévia ao aplicar) e há duas globais
+for (const a of [
+  { scope: 'client', libraryId: 2, clientId: 1, kind: 'replace', pattern: 'fila de pagamentos', replacement: 'fila de cobrança' },
+  { scope: 'client', libraryId: 2, clientId: 1, kind: 'replace', pattern: 'serviço de notificações', replacement: 'Serviço de Alertas', caseSensitive: true },
+  { scope: 'client', libraryId: 2, clientId: 1, kind: 'term', pattern: 'Alfa Cobrança' },
+  { scope: 'global', kind: 'replace', pattern: 'Gate Wei Service', replacement: 'Gateway Service' },
+  { scope: 'global', kind: 'term', pattern: 'Gateway Service' },
+]) rules.push(addRule(a))
+
 const edge = (c: string) => /[\p{L}\p{N}]/u.test(c)
 function patternRx(pattern: string, flags: string) {
   const body = pattern.split(/\s+/).map(rx).join('\\s+')

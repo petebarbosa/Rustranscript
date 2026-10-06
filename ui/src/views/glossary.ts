@@ -3,6 +3,7 @@ import { t } from '../i18n'
 import { libName, store, type View } from '../store'
 import { btnCls, confirmDialog, describeGlossaryError, form, inputCls } from '../dialogs'
 import { esc, fmtNumber, fold, toast } from '../util'
+import { caseBadge, readRule, ruleFields, ruleText, syncKind } from '../rules'
 
 interface Ctx { libraryId: number | null; clientId: number | null }
 
@@ -10,7 +11,6 @@ interface Ctx { libraryId: number | null; clientId: number | null }
 let lastCtx: Ctx = { libraryId: null, clientId: null }
 let lastTab: RuleKind = 'replace'
 
-const fail = (key: string): never => { throw { code: 'ui', detail: t(key) } }
 const field = (label: string, input: string, hint = '') =>
   `<label class="block text-sm"><span class="mb-1.5 block text-zinc-400">${esc(label)}</span>${input}${hint ? `<span class="mt-1 block text-xs text-zinc-600">${esc(hint)}</span>` : ''}</label>`
 
@@ -26,6 +26,7 @@ export async function renderGlossary(el: HTMLElement, params: URLSearchParams): 
 
   let ctx = lastCtx
   if (params.get('lib') && params.get('client')) ctx = { libraryId: Number(params.get('lib')), clientId: Number(params.get('client')) }
+  else if (params.has('global')) ctx = contexts[0].ctx // link do modal da chamada: vai direto às regras globais
   if (!contexts.some(c => c.value === keyOf(ctx))) ctx = contexts[0].ctx
   let tab: RuleKind = lastTab
   let rules: Rule[] = []
@@ -51,9 +52,7 @@ export async function renderGlossary(el: HTMLElement, params: URLSearchParams): 
   function rowHtml(r: Rule) {
     const dim = r.overridden ? 'opacity-50' : ''
     const strike = r.overridden ? 'line-through decoration-zinc-500' : ''
-    const text = r.kind === 'replace'
-      ? `<span class="text-rose-200/90 ${strike}">${esc(r.pattern)}</span> <span class="text-zinc-600">→</span> <span class="text-emerald-200 ${strike}">${esc(r.replacement ?? '')}</span>`
-      : `<span class="text-zinc-100 ${strike}">${esc(r.pattern)}</span>`
+    const text = ruleText(r, strike)
     const act = 'rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/5 hover:text-zinc-100'
     return `<li data-rule data-scope="${r.scope}" data-id="${r.id}" data-lib="${r.library_id ?? ''}" class="flex items-center gap-3 rounded-xl border border-white/10 bg-ink-900/60 px-4 py-3">
       <div class="flex min-w-0 flex-1 items-center gap-3 ${dim}">
@@ -62,7 +61,7 @@ export async function renderGlossary(el: HTMLElement, params: URLSearchParams): 
           <p class="break-words font-mono text-sm">${text}</p>
           ${r.overridden ? `<p class="mt-0.5 text-xs text-amber-300/80">${esc(t('glossary.overridden'))}</p>` : ''}
         </div>
-        ${r.case_sensitive ? `<span title="${esc(t('glossary.case_hint'))}" class="shrink-0 rounded-full border border-white/10 px-2 py-0.5 text-[11px] text-zinc-400">Aa · ${esc(t('glossary.case_short'))}</span>` : ''}
+        ${caseBadge(r)}
       </div>
       <div class="flex shrink-0 items-center">
         <button type="button" data-edit class="${act}">${esc(t('common.edit'))}</button>
@@ -122,36 +121,6 @@ export async function renderGlossary(el: HTMLElement, params: URLSearchParams): 
   async function reload() { await load(); draw() }
 
   // ------------------------------------------------------------------ ações
-  const ruleFields = (r: Partial<Rule>, kind: RuleKind) => `
-    ${field(t('glossary.f_kind'), `<select name="kind" class="${inputCls}">
-      <option value="replace" ${kind === 'replace' ? 'selected' : ''}>${esc(t('glossary.kind_replace'))}</option>
-      <option value="term" ${kind === 'term' ? 'selected' : ''}>${esc(t('glossary.kind_term'))}</option></select>`)}
-    ${field(t('glossary.f_pattern'), `<input name="pattern" required maxlength="200" class="${inputCls}" value="${esc(r.pattern ?? '')}" placeholder="${esc(t('glossary.f_pattern_ph'))}">`, t('glossary.f_pattern_hint'))}
-    <div data-rep>${field(t('glossary.f_replacement'), `<input name="replacement" maxlength="500" class="${inputCls}" value="${esc(r.replacement ?? '')}" placeholder="${esc(t('glossary.f_replacement_ph'))}">`)}</div>
-    <label class="flex items-start gap-2 text-sm text-zinc-300"><input name="case" type="checkbox" ${r.case_sensitive ? 'checked' : ''} class="mt-0.5 accent-violet-500">
-      <span>${esc(t('glossary.f_case'))}<span class="block text-xs text-zinc-600">${esc(t('glossary.f_case_hint'))}</span></span></label>`
-
-  /** Mostra/esconde o campo de substituição conforme o tipo. */
-  const syncKind = (f: HTMLFormElement) => {
-    const sel = f.elements.namedItem('kind') as HTMLSelectElement
-    const go = () => { f.querySelector<HTMLElement>('[data-rep]')!.hidden = sel.value === 'term' }
-    sel.addEventListener('change', go)
-    go()
-  }
-
-  function readRule(f: HTMLFormElement) {
-    const d = new FormData(f)
-    const kind = String(d.get('kind')) as RuleKind
-    const pattern = String(d.get('pattern') ?? '').replace(/\s+/g, ' ').trim()
-    const replacement = kind === 'replace' ? String(d.get('replacement') ?? '').replace(/\s+/g, ' ').trim() : null
-    if (!pattern) fail('glossary.err.pattern_empty')
-    if (kind === 'replace') {
-      if (!replacement) fail('glossary.err.replacement_empty')
-      if (replacement === pattern) fail('glossary.err.same')
-    }
-    return { kind, pattern, replacement, caseSensitive: d.get('case') === 'on' }
-  }
-
   async function addRule() {
     const own = isClient()
     const scopeField = own

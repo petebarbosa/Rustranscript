@@ -1,9 +1,10 @@
-import { api, toError, type BleedRemoval, type BlockEdit, type BlockInfo, type BlockSuggestion, type CallDetail, type Hit, type HistoryEntry, type JobInfo, type Scope, type SpeakerInfo } from '../api'
+import { api, toError, type BleedRemoval, type BlockEdit, type BlockInfo, type CallDetail, type Hit, type HistoryEntry, type JobInfo, type Rule, type RuleKind, type SpeakerInfo } from '../api'
 import { t } from '../i18n'
 import { hooks, libName, meName, store, type View } from '../store'
 import { assignDialog, btnCls, confirmDialog, describeError, describeGlossaryError, field, form, inputCls, renameDialog } from '../dialogs'
 import { cancelJob, enqueueCall, isReady, jobError, jobForCall, jobProgress, retryJob, stageText, subscribe as subscribeTx, tx } from '../tx'
-import { barHtml, callTitle, diffWords, esc, fmtClock, fmtDate, fmtDuration, fmtNumber, fmtTime, fold, h, rx, speakerDefault, speakerName, toast, toastAction } from '../util'
+import { barHtml, callTitle, diffWords, esc, fmtClock, fmtDate, fmtDuration, fmtNumber, fmtTime, fold, speakerDefault, speakerName, toast, toastAction } from '../util'
+import { caseBadge, readRule, ruleFields, ruleText, syncKind } from '../rules'
 
 // (rótulo, balão) para quem não é o microfone
 const PALETTE = [
@@ -189,7 +190,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
             <span id="count" class="pointer-events-none absolute right-3 top-2 text-xs text-zinc-500"></span>
           </div>
           <button id="assign" type="button" class="shrink-0 whitespace-nowrap rounded-xl border border-white/10 bg-ink-900 px-3 py-2 text-sm text-zinc-300 hover:border-violet-400/50">${esc(t('call.assign'))}</button>
-          <button id="apply-glossary" type="button" ${pending ? 'hidden' : ''} title="${esc(t('glossary.apply_hint'))}" class="shrink-0 whitespace-nowrap rounded-xl border border-white/10 bg-ink-900 px-3 py-2 text-sm text-zinc-300 hover:border-violet-400/50">${esc(t('glossary.apply'))}</button>
+          <button id="glossary-btn" type="button" title="${esc(t('glossary.open_hint'))}" class="shrink-0 whitespace-nowrap rounded-xl border border-white/10 bg-ink-900 px-3 py-2 text-sm text-zinc-300 hover:border-violet-400/50">${esc(t('glossary.open'))}</button>
           <button id="select-btn" type="button" ${pending ? 'hidden' : ''} aria-pressed="false" title="${esc(t('call.select_hint'))}" class="shrink-0 whitespace-nowrap rounded-xl border border-white/10 bg-ink-900 px-3 py-2 text-sm text-zinc-300 hover:border-violet-400/50">${esc(t('call.select'))}</button>
           <button id="history" type="button" class="shrink-0 whitespace-nowrap rounded-xl border border-white/10 bg-ink-900 px-3 py-2 text-sm text-zinc-300 hover:border-violet-400/50">${esc(t('call.history'))}</button>
         </div>
@@ -291,7 +292,6 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
       <div class="mt-2 flex flex-wrap items-center gap-2">
         <button type="button" data-save class="${btnCls.btnPrimary} !px-3 !py-1.5">${esc(t('common.save'))}</button>
         <button type="button" data-cancel class="${btnCls.btn} !px-3 !py-1.5">${esc(t('common.cancel'))}</button>
-        <button type="button" data-glossary title="${esc(t('call.add_glossary_hint'))}" class="${btnCls.btn} !px-3 !py-1.5 sm:ml-auto">${esc(t('call.add_glossary'))}</button>
       </div>
       <p class="mt-1.5 text-[11px] text-zinc-600">${esc(t('call.edit_hint'))}</p></div>`)
     const ta = editorOf(b)!
@@ -302,12 +302,9 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     ta.setSelectionRange(ta.value.length, ta.value.length)
   }
 
-  /** Habilita Salvar/Adicionar ao glossário conforme o rascunho. */
+  /** Habilita Salvar conforme o rascunho. */
   function syncEditor(b: HTMLElement) {
-    const ta = editorOf(b)!, info = blockData(b), v = norm(ta.value)
-    b.querySelector<HTMLButtonElement>('[data-save]')!.disabled = !v
-    // com mudança: edita e abre a regra; sem mudança num trecho já editado: regra do original → corrigido
-    b.querySelector<HTMLButtonElement>('[data-glossary]')!.disabled = !v || (v === info.text && !info.edited)
+    b.querySelector<HTMLButtonElement>('[data-save]')!.disabled = !norm(editorOf(b)!.value)
   }
 
   function closeEditor(b: HTMLElement) {
@@ -329,23 +326,6 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
 
   function cancelEditor(b: HTMLElement) { closeEditor(b); setStatus('') }
 
-  /** "Adicionar ao glossário": salva a edição (se houver) e abre a regra já preenchida com original → corrigido. */
-  async function glossaryFromEditor(b: HTMLElement) {
-    const ta = editorOf(b)
-    if (!ta) return
-    const v = norm(ta.value), info = blockData(b)
-    let from = info.text, editId: number | null = null
-    if (v !== info.text) {
-      const r = await save(b, () => api.setBlockText(libraryId, info.id, v))
-      if (!r) return
-      editId = r.edit_id
-    } else if (info.edited) from = info.original_text
-    else return
-    const to = blockData(b).text
-    closeEditor(b)
-    await offerRule(from, to, editId, info.id)
-  }
-
   function applyBlock(b: HTMLElement, info: BlockInfo) {
     const i = d.blocks.findIndex(x => x.id === info.id)
     d.blocks[i] = info
@@ -356,7 +336,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     else b.removeAttribute('title')
   }
 
-  /** Salva (histórico/desfazer pelo mesmo caminho de sempre); devolve null se falhou. Não oferece sugestões. */
+  /** Salva (histórico/desfazer pelo mesmo caminho de sempre); devolve null se falhou. */
   let lastSave: Promise<unknown> = Promise.resolve()
   function save(b: HTMLElement, fn: () => Promise<BlockInfo | BlockEdit>): Promise<BlockEdit | null> {
     setStatus(t('call.saving'), 'busy')
@@ -470,15 +450,16 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     catch (e) { toast(describeError(e), 'err') }
   }
 
-  async function assign() {
+  /** `back`: veio do modal do glossário (chamada sem cliente); volta a ele, na chamada já classificada ou se desistir. */
+  async function assign(back = false) {
     const r = await assignDialog({ library_id: d.library_id, client_id: d.client_id })
-    if (!r) return
+    if (!r) { if (back) await glossaryDialog(); return }
     try {
       const moved = await api.assign(libraryId, callId, r.libraryId, r.clientId)
       const target = store.libraries.find(l => l.id === moved.library_id)
       await hooks.reloadNav()
       toast(t('assign.done', { place: target ? libName(target) : '' }))
-      location.hash = `#/call/${moved.library_id}/${moved.call_id}`
+      location.hash = `#/call/${moved.library_id}/${moved.call_id}${back ? '?glossary=1' : ''}`
     } catch (e) { toast(describeError(e), 'err') }
   }
 
@@ -682,118 +663,167 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     toast(t('glossary.applied', { n: real.blocks_changed }))
   }
 
-  // Regra de glossário a partir de uma edição (só quando o usuário pede, pelo botão do editor): cartões flutuantes.
-  // O padrão e a substituição são editáveis (o motor sugere só o trecho mínimo, que pode ser amplo demais).
-  const panel = h('div', { id: 'suggest-panel', class: 'pointer-events-none fixed bottom-4 right-4 z-40 flex max-h-[75vh] w-[min(26rem,calc(100vw-2rem))] flex-col gap-2 overflow-y-auto' })
-  document.body.appendChild(panel)
-  const MAX_OFFERS = 3
-  const edge = (c: string) => /[\p{L}\p{N}]/u.test(c)
+  /**
+   * Modal do glossário da chamada: regras do cliente (adicionar, editar e remover ali mesmo), globais só para leitura
+   * (recolhidas) e "Aplicar à chamada". É um <dialog> só: por isso a edição e a confirmação de remoção são inline,
+   * e "Classificar"/"Aplicar" fecham este modal antes de abrir o seguinte.
+   */
+  async function glossaryDialog() {
+    const clientId = d.client_id
+    let all: Rule[] = []
+    const load = async () => { all = await api.glossaryList(clientId != null ? libraryId : null, clientId) }
+    try { await load() } catch (e) { toast(describeGlossaryError(e), 'err'); return }
+    const own = () => all.filter(r => r.scope === 'client')
+    const globals = all.filter(r => r.scope === 'global')
 
-  /** Quantos outros trechos (texto atual) trazem o padrão — palavra inteira, sem caixa. */
-  function occurrences(pattern: string, except: number) {
-    const p = norm(pattern)
-    if (!p) return 0
-    const re = new RegExp((edge(p[0]) ? '(?<![\\p{L}\\p{N}])' : '') + p.split(' ').map(rx).join('\\s+') + (edge(p[p.length - 1]) ? '(?![\\p{L}\\p{N}])' : ''), 'iu')
-    return d.blocks.filter(b => b.id !== except && re.test(b.text)).length
-  }
-  const occText = (n: number) => (n ? t('suggest.occurrences', { n }) : t('suggest.occurrences_none'))
+    // `{ id: null }` = regra nova; `{ id }` = editando essa; só um editor por vez
+    let editing: { id: number | null } | null = null
+    let removing: number | null = null
+    let note: { text: string; err?: boolean } | null = null
+    let next: 'classify' | null = null
+    let f!: HTMLFormElement
 
-  function offer(s: BlockSuggestion, editId: number | null, blockId: number) {
-    const key = `${s.pattern}\u0001${s.replacement}`
-    panel.querySelectorAll<HTMLElement>('[data-offer]').forEach(c => { if (c.dataset.offer === key) c.remove() })
-    const cards = panel.querySelectorAll<HTMLElement>('[data-offer]')
-    if (cards.length >= MAX_OFFERS) cards[cards.length - 1].remove() // a mais antiga fica por último
-    const card = h('div', { 'data-offer': key, class: 'pointer-events-auto rounded-2xl border border-violet-400/30 bg-ink-900/95 p-4 shadow-2xl backdrop-blur-md' }, `
-      <div class="flex items-start justify-between gap-2">
-        <p class="text-sm font-medium text-white">${esc(t('suggest.title'))}</p>
-        <button type="button" data-ignore aria-label="${esc(t('suggest.ignore'))}" class="-mr-1 -mt-1 rounded-lg px-2 text-lg leading-none text-zinc-500 hover:bg-white/5 hover:text-zinc-100">×</button>
-      </div>
-      <p class="mt-1 text-sm text-zinc-400">‘${esc(s.pattern)}’ → ‘${esc(s.replacement)}’ · <span data-occ>${esc(occText(s.occurrences_in_call))}</span></p>
-      <div class="mt-3 grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-        <input data-pattern maxlength="200" aria-label="${esc(t('glossary.f_pattern'))}" value="${esc(s.pattern)}" class="${inputCls} !px-2.5 !py-1.5 font-mono">
-        <span class="text-zinc-600">→</span>
-        <input data-replacement maxlength="500" aria-label="${esc(t('glossary.f_replacement'))}" value="${esc(s.replacement)}" class="${inputCls} !px-2.5 !py-1.5 font-mono">
-      </div>
-      <p class="mt-1.5 text-xs text-zinc-600">${esc(t('suggest.widen_hint'))}</p>
-      <label class="mt-3 flex items-center gap-2 text-xs text-zinc-300"><input data-apply type="checkbox" ${s.occurrences_in_call ? 'checked' : ''} class="accent-violet-500"> ${esc(t('suggest.apply_now'))}</label>
-      <label class="mt-1.5 flex items-center gap-2 text-xs text-zinc-400"><input data-case type="checkbox" class="accent-violet-500"> ${esc(t('glossary.f_case'))}</label>
-      ${s.client ? `<p class="mt-2 text-xs text-zinc-500">${esc(t('suggest.client_is', { name: s.client.name }))}</p>` : `<p class="mt-2 text-xs text-amber-300/80">${esc(t('suggest.no_client'))}</p>`}
-      <p data-err class="mt-1 min-h-4 text-xs text-rose-300"></p>
-      <div class="mt-1 flex flex-wrap justify-end gap-2">
-        <button type="button" data-ignore class="rounded-xl px-3 py-1.5 text-sm text-zinc-400 hover:bg-white/5 hover:text-zinc-100">${esc(t('suggest.ignore'))}</button>
-        <button type="button" data-create="global" class="${btnCls.btn} !px-3 !py-1.5">${esc(t('suggest.create_global'))}</button>
-        ${s.client ? `<button type="button" data-create="client" class="${btnCls.btnPrimary} !px-3 !py-1.5">${esc(t('suggest.create_client'))}</button>` : ''}
-      </div>`)
-    Object.assign(card, { _ctx: { s, editId, blockId } })
-    panel.prepend(card)
-  }
+    const act = 'rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/5 hover:text-zinc-100'
+    const box = 'rounded-xl border border-white/10 bg-ink-950/60'
 
-  /** Abre o cartão de regra pré-preenchido: o motor sugere o trecho mínimo; sem sugestão, vale o texto inteiro. */
-  async function offerRule(from: string, to: string, editId: number | null, blockId: number) {
-    let list: BlockSuggestion[] = []
-    try { list = await api.glossarySuggestions(libraryId, blockId, from, to) } catch { /* cai no texto inteiro */ }
-    if (!list.length) {
-      list = [{ pattern: from, replacement: to, occurrences_in_call: occurrences(from, blockId), client: d.client_id != null ? { id: d.client_id, name: d.client_name ?? '' } : null }]
+    const editorHtml = (r: Rule | null) => `<li data-editor class="space-y-3 rounded-xl border border-violet-400/30 bg-ink-950/60 p-4">
+      ${ruleFields(r ?? {}, r?.kind ?? 'replace')}
+      <p data-ed-err class="min-h-4 text-sm text-rose-300"></p>
+      <div class="flex justify-end gap-2">
+        <button type="button" data-ed-cancel class="${btnCls.btn} !px-3 !py-1.5">${esc(t('common.cancel'))}</button>
+        <button type="button" data-ed-save class="${btnCls.btnPrimary} !px-3 !py-1.5">${esc(t(r ? 'common.save' : 'common.add'))}</button></div></li>`
+
+    function rowHtml(r: Rule) {
+      if (editing?.id === r.id) return editorHtml(r)
+      if (removing === r.id) {
+        const what = r.kind === 'replace' ? `${r.pattern} → ${r.replacement}` : r.pattern
+        return `<li data-rule="${r.id}" class="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-rose-400/30 bg-rose-400/[0.05] px-3 py-2">
+          <p class="min-w-0 flex-1 text-sm text-rose-100">${esc(t('glossary.remove_confirm', { what }))}</p>
+          <div class="flex shrink-0 gap-2">
+            <button type="button" data-rm-cancel class="${btnCls.btn} !px-3 !py-1.5">${esc(t('common.cancel'))}</button>
+            <button type="button" data-rm-ok class="rounded-xl border border-rose-400/50 bg-rose-500/15 px-3 py-1.5 text-sm font-medium text-rose-100 hover:bg-rose-500/25">${esc(t('common.remove'))}</button></div></li>`
+      }
+      return `<li data-rule="${r.id}" class="flex items-center gap-3 ${box} px-3 py-2">
+        <p class="min-w-0 flex-1 break-words font-mono text-sm">${ruleText(r)}</p>${caseBadge(r)}
+        <div class="flex shrink-0 items-center">
+          <button type="button" data-edit class="${act}">${esc(t('common.edit'))}</button>
+          <button type="button" data-remove class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-rose-400/10 hover:text-rose-200">${esc(t('common.remove'))}</button></div></li>`
     }
-    for (const s of list.slice(0, MAX_OFFERS).reverse()) offer(s, editId, blockId) // `offer` empilha no topo
-    panel.querySelector<HTMLInputElement>('[data-offer] [data-pattern]')?.focus()
-  }
 
-  async function createFromOffer(card: HTMLElement, scope: Scope) {
-    const { s, editId } = (card as any)._ctx as { s: BlockSuggestion; editId: number | null }
-    const q = <T extends HTMLElement>(sel: string) => card.querySelector<T>(sel)!
-    const pattern = norm(q<HTMLInputElement>('[data-pattern]').value), replacement = norm(q<HTMLInputElement>('[data-replacement]').value)
-    const err = q('[data-err]')
-    err.textContent = ''
-    if (!pattern) { err.textContent = t('glossary.err.pattern_empty'); return }
-    if (!replacement) { err.textContent = t('glossary.err.replacement_empty'); return }
-    if (replacement === pattern) { err.textContent = t('glossary.err.same'); return }
-    card.querySelectorAll('button').forEach(b => (b.disabled = true))
-    try {
-      await api.glossaryAdd({
-        scope, kind: 'replace', pattern, replacement, caseSensitive: q<HTMLInputElement>('[data-case]').checked, sourceEditId: editId,
-        libraryId, clientId: scope === 'client' ? s.client?.id ?? null : null,
-      })
-    } catch (e) {
-      err.textContent = describeGlossaryError(e)
-      card.querySelectorAll('button').forEach(b => (b.disabled = false))
-      return
+    /** Regras do cliente em dois grupos (substituições, termos); o editor de regra nova abre no topo. */
+    function clientHtml() {
+      if (clientId == null) {
+        return `<div class="rounded-xl border border-amber-400/20 bg-amber-400/[0.04] p-4">
+          <h3 class="text-sm font-semibold text-amber-100">${esc(t('glossary.no_client_title'))}</h3>
+          <p class="mt-1 text-sm text-zinc-400">${esc(t('glossary.no_client_body'))}</p>
+          <button type="button" data-classify class="${btnCls.btnPrimary} mt-3 !px-3 !py-1.5">${esc(t('call.assign'))}</button></div>`
+      }
+      const rs = own()
+      const group = (kind: RuleKind, label: string) => {
+        const list = rs.filter(r => r.kind === kind)
+        return list.length ? `<li role="presentation" class="pt-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-600 first:pt-0">${esc(label)}</li>${list.map(rowHtml).join('')}` : ''
+      }
+      const rows = group('replace', t('glossary.tab_replace')) + group('term', t('glossary.tab_term'))
+      return `<div class="flex items-center justify-between gap-3">
+          <h3 class="text-sm font-semibold text-zinc-200">${esc(t('glossary.client_rules'))} <span class="text-xs font-normal tabular-nums text-zinc-500">${fmtNumber(rs.length)}</span></h3>
+          <button type="button" data-add class="${btnCls.btn} !px-3 !py-1.5">+ ${esc(t('glossary.modal_add'))}</button></div>
+        <p class="mt-0.5 text-xs text-zinc-500">${esc(t('glossary.scope_client', { name: d.client_name ?? '' }))}</p>
+        <ul class="mt-3 space-y-2 ${editing ? '' : 'max-h-[38vh] overflow-y-auto pr-1'}">${editing?.id === null ? editorHtml(null) : ''}${rows || (editing?.id === null ? '' : `<li class="rounded-xl border border-dashed border-white/10 px-4 py-6 text-center text-sm text-zinc-600">${esc(t('glossary.client_empty'))}</li>`)}</ul>`
     }
-    const applyNow = q<HTMLInputElement>('[data-apply]').checked
-    card.remove()
-    toast(t(scope === 'client' ? 'suggest.created_client' : 'suggest.created_global'))
-    if (applyNow) await applyGlossary()
-  }
 
-  panel.addEventListener('click', e => {
-    const target = e.target as HTMLElement
-    const card = target.closest<HTMLElement>('[data-offer]')
-    if (!card) return
-    if (target.closest('[data-ignore]')) card.remove()
-    const c = target.closest<HTMLElement>('[data-create]')
-    if (c) void createFromOffer(card, c.dataset.create as Scope)
-  })
-  panel.addEventListener('input', e => {
-    const card = (e.target as HTMLElement).closest<HTMLElement>('[data-offer]')
-    if (!card || !(e.target as HTMLElement).matches('[data-pattern]')) return
-    card.querySelector('[data-occ]')!.textContent = occText(occurrences((e.target as HTMLInputElement).value, (card as any)._ctx.blockId))
-  })
-  panel.addEventListener('keydown', e => {
-    const card = (e.target as HTMLElement).closest<HTMLElement>('[data-offer]')
-    if (!card) return
-    if (e.key === 'Escape') { e.preventDefault(); card.remove() }
-    if (e.key === 'Enter' && (e.target as HTMLElement).matches('input[type="text"], input:not([type])')) {
-      e.preventDefault()
-      void createFromOffer(card, card.querySelector('[data-create="client"]') ? 'client' : 'global')
+    const globalHtml = () => {
+      const rows = globals.map(r => `<li class="flex items-center gap-3 ${r.overridden ? 'opacity-50' : ''}">
+        <p class="min-w-0 flex-1 break-words font-mono text-sm">${ruleText(r, r.overridden ? 'line-through decoration-zinc-500' : '')}</p>${caseBadge(r)}</li>`).join('')
+      return `<details class="${box}">
+        <summary class="cursor-pointer select-none px-4 py-2.5 text-sm font-semibold text-zinc-300 hover:text-white">${esc(t('glossary.global_rules'))} <span class="text-xs font-normal tabular-nums text-zinc-500">${fmtNumber(globals.length)}</span></summary>
+        <div class="border-t border-white/5 px-4 py-3">
+          <p class="text-xs text-zinc-500">${esc(t('glossary.global_hint'))}</p>
+          <ul class="mt-2 max-h-[28vh] space-y-1.5 overflow-y-auto pr-1">${rows || `<li class="text-sm text-zinc-600">${esc(t('glossary.global_empty'))}</li>`}</ul>
+          <a href="#/glossary?global" data-to-glossary class="mt-3 inline-block text-xs text-violet-300 hover:underline">${esc(t('glossary.manage_global'))} →</a></div></details>`
     }
-  })
+
+    function paint() {
+      f.querySelector('[data-client]')!.innerHTML = clientHtml()
+      const n = f.querySelector<HTMLElement>('[data-note]')!
+      n.textContent = note?.text ?? ''
+      n.className = `min-h-4 text-sm ${note?.err ? 'text-rose-300' : 'text-emerald-300'}`
+      const ed = f.querySelector<HTMLElement>('[data-editor]')
+      if (ed) { syncKind(ed); ed.querySelector<HTMLInputElement>('[name="pattern"]')!.focus() }
+    }
+    const reload = async () => { await load(); paint() }
+
+    async function saveRule() {
+      const ed = f.querySelector<HTMLElement>('[data-editor]')!
+      const err = ed.querySelector<HTMLElement>('[data-ed-err]')!
+      err.textContent = ''
+      const cur = editing!.id == null ? null : own().find(r => r.id === editing!.id)!
+      try {
+        const input = readRule(ed)
+        try {
+          if (cur) await api.glossaryUpdate({ ...input, scope: 'client', libraryId: cur.library_id, id: cur.id })
+          else await api.glossaryAdd({ ...input, scope: 'client', libraryId, clientId })
+        } catch (e) { throw { code: 'ui', detail: describeGlossaryError(e) } }
+      } catch (e) { err.textContent = describeError(e); return }
+      editing = null
+      note = { text: t(cur ? 'call.saved' : 'glossary.added') }
+      try { await reload() } catch (e) { note = { text: describeGlossaryError(e), err: true }; paint() }
+    }
+
+    async function removeRule() {
+      const r = own().find(x => x.id === removing)
+      removing = null
+      if (!r) { paint(); return }
+      try { await api.glossaryRemove('client', r.library_id, r.id); note = { text: t('glossary.removed') }; await reload() }
+      catch (e) { note = { text: describeGlossaryError(e), err: true }; paint() }
+    }
+
+    const body = `<p class="text-sm text-zinc-500">${esc(t('glossary.modal_intro'))}</p>
+      <section data-client></section>
+      ${globalHtml()}
+      <p data-note aria-live="polite"></p>
+      ${noTranscript() ? `<p class="rounded-xl border border-white/10 bg-ink-950/50 px-3 py-2 text-xs text-zinc-500">${esc(t('glossary.pending_note'))}</p>` : ''}`
+
+    const r = await form(t('glossary.title'), body, t('glossary.apply_call'),
+      async () => {
+        if (f.querySelector('[data-editor]')) throw { code: 'ui', detail: t('glossary.finish_first') }
+        return 'apply' as const
+      },
+      fm => {
+        f = fm
+        f.noValidate = true // o campo do editor aberto não pode barrar o "Aplicar à chamada"
+        f.closest('dialog')!.style.width = 'min(40rem,calc(100vw - 2rem))'
+        // sem transcrição não há o que aplicar; as regras (termos) valem para quando for transcrita
+        if (noTranscript()) f.querySelector<HTMLElement>('[type="submit"]')!.hidden = true
+        paint()
+        // Enter dentro do editor salva a regra (não dispara o "Aplicar à chamada" do formulário)
+        f.addEventListener('keydown', e => {
+          const el = e.target as HTMLElement
+          if (e.key === 'Enter' && el.closest('[data-editor]') && !el.matches('button')) { e.preventDefault(); void saveRule() }
+        })
+        f.addEventListener('click', e => {
+          const el = e.target as HTMLElement
+          const id = () => Number(el.closest<HTMLElement>('[data-rule]')!.dataset.rule)
+          if (el.closest('[data-add]')) { editing = { id: null }; removing = null; note = null; paint() }
+          else if (el.closest('[data-edit]')) { editing = { id: id() }; removing = null; note = null; paint() }
+          else if (el.closest('[data-remove]')) { removing = id(); editing = null; note = null; paint() }
+          else if (el.closest('[data-ed-cancel]')) { editing = null; paint() }
+          else if (el.closest('[data-ed-save]')) void saveRule()
+          else if (el.closest('[data-rm-cancel]')) { removing = null; paint() }
+          else if (el.closest('[data-rm-ok]')) void removeRule()
+          else if (el.closest('[data-classify]')) { next = 'classify'; f.closest('dialog')!.close() }
+          else if (el.closest('[data-to-glossary]')) f.closest('dialog')!.close() // a navegação segue pelo link
+        })
+      }, t('common.close'))
+    if (next === 'classify') await assign(true)
+    else if (r === 'apply') await applyGlossary()
+  }
 
   function bind() {
     $('#q').addEventListener('input', runSearch)
     $('#title-edit').addEventListener('click', editTitle)
     $('#history').addEventListener('click', showHistory)
-    $('#assign').addEventListener('click', assign)
-    $('#apply-glossary').addEventListener('click', applyGlossary)
+    $('#assign').addEventListener('click', () => void assign())
+    $('#glossary-btn').addEventListener('click', glossaryDialog)
     el.querySelector('#select-btn')?.addEventListener('click', () => void setSelecting(!selecting))
     el.querySelector('#speakers-btn')?.addEventListener('click', speakersDialog)
     el.querySelector('#redo-btn')?.addEventListener('click', redoDialog)
@@ -873,7 +903,6 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     if (blk && target.closest('[data-edit]')) { openEditor(blk); return }
     if (blk && target.closest('[data-save]')) { void saveEditor(blk); return }
     if (blk && target.closest('[data-cancel]')) { cancelEditor(blk); return }
-    if (blk && target.closest('[data-glossary]')) { void glossaryFromEditor(blk); return }
     const rev = target.closest('[data-revert]')
     if (rev) { const b = rev.closest<HTMLElement>('[data-block]')!; void save(b, () => api.revertBlock(libraryId, blockData(b).id)).then(r => { if (r) closeEditor(b) }); return }
     const sb = target.closest('[data-speaker-btn]')
@@ -901,13 +930,14 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
   // fila: a faixa/estado da chamada acompanha; mudança de estado da tarefa desta chamada recarrega (versão nova, falha...)
   const jobSig = () => { const j = jobForCall(libraryId, callId); return j ? `${j.id}:${j.state}` : '' }
   let sig = jobSig()
-  const busy = () => !!el.querySelector('[data-editing]') || !!document.querySelector('dialog[open]') || panel.contains(document.activeElement)
+  const busy = () => !!el.querySelector('[data-editing]') || !!document.querySelector('dialog[open]')
   const offs = [
     subscribeTx('queue', () => { const n = jobSig(); if (n !== sig) { sig = n; if (!busy()) void reload(); else paintJob() } else paintJob() }),
     subscribeTx('progress', paintJob),
   ]
 
   draw()
+  if (params.get('glossary')) { history.replaceState(null, '', location.hash.split('?')[0]); void glossaryDialog() } // volta do "Classificar" do modal
   const target = Number(params.get('b'))
   const q = params.get('q')
   if (q) { $<HTMLInputElement>('#q').value = q; runSearch() }
@@ -920,7 +950,6 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     dispose: () => {
       alive = false
       offs.forEach(f => f())
-      panel.remove()
       io?.disconnect()
       ro?.disconnect()
       el.style.removeProperty('--hdr')

@@ -206,7 +206,7 @@ async function afterDeletion(target: DeleteTarget, r: Deletion) {
   if (gone) location.hash = '#/'
   const kind = target.clientId == null ? 'company' : 'client'
   const vars = { name: target.name, n: r.moved || r.deleted, count: r.moved || r.deleted }
-  let msg = r.moved ? t(`purge.done_moved_${kind}`, vars) : r.deleted ? t('purge.done_erased', vars) : t('purge.done', vars)
+  let msg = r.moved ? t(`purge.done_moved_${kind}`, vars) : r.deleted ? t(`purge.done_erased_${kind}`, vars) : t(`purge.done_${kind}`, vars)
   if (r.leftover.length) msg += ' ' + t('purge.leftover', { items: r.leftover.join(', ') })
   toast(msg)
 }

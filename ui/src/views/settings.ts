@@ -144,7 +144,7 @@ export async function renderSettings(el: HTMLElement): Promise<View> {
           <span class="whitespace-nowrap text-xs text-zinc-500">${esc(t('settings.calls', { n: l.call_count, count: fmtNumber(l.call_count) }))}</span>
           <button type="button" data-rename="${l.id}" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/5 hover:text-zinc-100">${esc(t('common.rename'))}</button>
           <button type="button" data-remove="${l.id}" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-rose-400/10 hover:text-rose-200">${esc(t('settings.unregister'))}</button>
-          <button type="button" data-delete-lib="${l.id}" class="rounded-lg px-2 py-1 text-xs text-rose-300/80 hover:bg-rose-400/10 hover:text-rose-200">${esc(t('purge.action'))}</button>
+          ${l.available ? `<button type="button" data-delete-lib="${l.id}" class="rounded-lg px-2 py-1 text-xs text-rose-300/80 hover:bg-rose-400/10 hover:text-rose-200">${esc(t('purge.action'))}</button>` : ''}
           ${(store.clients.get(l.id) ?? []).length ? `<ul class="mt-1 w-full space-y-1 border-t border-white/5 pt-2">${(store.clients.get(l.id) ?? []).map(c => `<li class="flex items-center gap-3 pl-3 text-sm">
             <span class="min-w-0 flex-1 truncate text-zinc-300">${esc(c.name)}</span>
             <span class="whitespace-nowrap text-xs text-zinc-600">${esc(t('settings.calls', { n: c.call_count, count: fmtNumber(c.call_count) }))}</span>

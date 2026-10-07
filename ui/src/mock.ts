@@ -1169,6 +1169,7 @@ function deletion(a: Args, clientId: number | null): Deletion | Promise<Deletion
     }
     if (clientId == null) {
       clients.splice(0, clients.length, ...clients.filter(c => c.library_id !== l.id))
+      jobs.splice(0, jobs.length, ...jobs.filter(j => j.library_id !== l.id)) // como `DELETE FROM transcription_jobs WHERE library_id`
       libs.splice(libs.indexOf(l), 1)
       out.folder_removed = true
     } else clients.splice(clients.indexOf(cl!), 1)

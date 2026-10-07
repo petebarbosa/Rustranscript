@@ -1,7 +1,7 @@
 import { api, type DeviceInfo, type RecordDevices, type RecordInfo, type ShortcutInfo, type StreamChoice } from '../api'
 import { LANGS, lang, setLang, t, type Lang } from '../i18n'
 import { hooks, store, type View } from '../store'
-import { addLibraryDialog, btnCls, confirmDialog, describeError, inputCls, renameDialog } from '../dialogs'
+import { addLibraryDialog, btnCls, confirmDialog, deleteDialog, describeError, inputCls, renameDialog } from '../dialogs'
 import { esc, fmtNumber, toast } from '../util'
 import { mountAudioStorage } from './storage'
 import { mountTranscriptionSettings } from './txsettings'
@@ -137,12 +137,18 @@ export async function renderSettings(el: HTMLElement): Promise<View> {
           <button id="add-lib" type="button" class="${btnCls.btn}">+ ${esc(t('nav.add_company'))}</button>
         </div>
         <p class="mt-1 text-xs text-zinc-600">${esc(t('settings.companies_hint'))}</p>
+        <p class="mt-1 text-xs text-zinc-600">${esc(t('settings.delete_hint'))}</p>
         <ul class="mt-3 space-y-2">${companies.map(l => `<li class="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-white/10 bg-ink-900/60 px-4 py-3">
           <div class="min-w-0 basis-56 flex-1"><p class="font-medium text-zinc-100">${esc(l.name)} ${l.available ? '' : `<span class="text-xs text-rose-300">· ${esc(t('nav.offline'))}</span>`}</p>
             <p class="truncate font-mono text-xs text-zinc-500">${esc(l.path)}</p></div>
           <span class="whitespace-nowrap text-xs text-zinc-500">${esc(t('settings.calls', { n: l.call_count, count: fmtNumber(l.call_count) }))}</span>
           <button type="button" data-rename="${l.id}" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/5 hover:text-zinc-100">${esc(t('common.rename'))}</button>
           <button type="button" data-remove="${l.id}" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-rose-400/10 hover:text-rose-200">${esc(t('settings.unregister'))}</button>
+          <button type="button" data-delete-lib="${l.id}" class="rounded-lg px-2 py-1 text-xs text-rose-300/80 hover:bg-rose-400/10 hover:text-rose-200">${esc(t('purge.action'))}</button>
+          ${(store.clients.get(l.id) ?? []).length ? `<ul class="mt-1 w-full space-y-1 border-t border-white/5 pt-2">${(store.clients.get(l.id) ?? []).map(c => `<li class="flex items-center gap-3 pl-3 text-sm">
+            <span class="min-w-0 flex-1 truncate text-zinc-300">${esc(c.name)}</span>
+            <span class="whitespace-nowrap text-xs text-zinc-600">${esc(t('settings.calls', { n: c.call_count, count: fmtNumber(c.call_count) }))}</span>
+            <button type="button" data-delete-client="${l.id}:${c.id}" class="rounded-lg px-2 py-1 text-xs text-rose-300/80 hover:bg-rose-400/10 hover:text-rose-200">${esc(t('purge.action'))}</button></li>`).join('')}</ul>` : ''}
         </li>`).join('') || `<li class="text-sm text-zinc-600">${esc(t('nav.no_companies'))}</li>`}</ul>
       </section>
 
@@ -188,6 +194,15 @@ tary --help</pre>
       const l = store.libraries.find(x => x.id === Number(b.dataset.remove))!
       if (!(await confirmDialog(t('settings.unregister'), t('settings.unregister_confirm', { name: l.name, path: l.path }), t('settings.unregister')))) return
       try { await api.removeLibrary(l.id); await hooks.reloadNav(); draw() } catch (e) { toast(describeError(e), 'err') }
+    }))
+    el.querySelectorAll<HTMLElement>('[data-delete-lib]').forEach(b => b.addEventListener('click', async () => {
+      const l = store.libraries.find(x => x.id === Number(b.dataset.deleteLib))!
+      if (await deleteDialog({ libraryId: l.id, name: l.name })) draw()
+    }))
+    el.querySelectorAll<HTMLElement>('[data-delete-client]').forEach(b => b.addEventListener('click', async () => {
+      const [lid, cid] = b.dataset.deleteClient!.split(':').map(Number)
+      const c = store.clients.get(lid)?.find(x => x.id === cid)
+      if (c && await deleteDialog({ libraryId: lid, clientId: cid, name: c.name })) draw()
     }))
   }
   function bindRecord() {

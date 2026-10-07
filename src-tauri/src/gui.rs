@@ -4,6 +4,7 @@ use std::sync::Mutex;
 
 use core_lib::import::{self, ImportOptions};
 use core_lib::model::*;
+use core_lib::removal::{self, DeleteMode, Deletion};
 use core_lib::rules::{ImportScope, RuleInput, RuleSource};
 use core_lib::{App, ClientFilter, Library, Origin, paths, search, storage, transfer};
 use serde::Serialize;
@@ -88,9 +89,42 @@ fn rename_library(state: State<AppState>, library_id: i64, name: String) -> R<()
     with_app(&state, |app| app.rename_library(library_id, &name))
 }
 
+/// Só tira da lista; a pasta e as chamadas ficam no disco (apagar de verdade: `delete_library`).
 #[tauri::command(async)]
 fn remove_library(state: State<AppState>, library_id: i64) -> R<()> {
     with_app(&state, |app| app.remove_library(library_id))
+}
+
+/// Roda `f` com um `App` próprio numa thread de bloqueio: mover/apagar chamadas pode demorar (disco
+/// externo), então nunca segura o `Mutex<App>` da janela nem a thread da UI. Fora de `dry_run`, avisa a tela.
+async fn run_deletion(
+    handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+    dry_run: bool,
+    f: impl FnOnce(&App) -> core_lib::Result<Deletion> + Send + 'static,
+) -> R<Deletion> {
+    let data_dir = state.data_dir.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || App::open(&data_dir).and_then(|app| f(&app)))
+        .await
+        .map_err(|e| bad(e.to_string()))?;
+    if !dry_run {
+        // mesmo com erro no meio, parte do conteúdo pode ter mudado
+        changed(&handle, json!({"event": "changed"}));
+    }
+    Ok(result?)
+}
+
+/// Apaga a empresa/projeto (nunca a inbox). Com chamadas, `mode` (`keep` | `delete`) é obrigatório;
+/// `dry_run` devolve só as contagens (chamadas, áudio, clientes, glossário).
+#[tauri::command]
+async fn delete_library(handle: tauri::AppHandle, state: State<'_, AppState>, library_id: i64, mode: Option<DeleteMode>, dry_run: bool) -> R<Deletion> {
+    run_deletion(handle, state, dry_run, move |app| removal::delete_library(app, library_id, mode, dry_run)).await
+}
+
+/// Apaga um cliente e o glossário dele; `keep` deixa as chamadas na empresa, sem cliente.
+#[tauri::command]
+async fn delete_client(handle: tauri::AppHandle, state: State<'_, AppState>, library_id: i64, client_id: i64, mode: Option<DeleteMode>, dry_run: bool) -> R<Deletion> {
+    run_deletion(handle, state, dry_run, move |app| removal::delete_client(app, library_id, client_id, mode, dry_run)).await
 }
 
 #[tauri::command(async)]
@@ -543,6 +577,8 @@ pub fn run(data_dir: Option<PathBuf>) {
             add_library,
             rename_library,
             remove_library,
+            delete_library,
+            delete_client,
             clients,
             add_client,
             rename_client,

@@ -14,6 +14,7 @@ pub mod parse;
 pub mod paths;
 pub mod player;
 pub mod recording;
+pub mod removal;
 pub mod rules;
 pub mod schema;
 pub mod search;

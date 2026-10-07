@@ -634,6 +634,29 @@ pub fn scan_orphans(app: &App, exclude: Option<&str>) -> Result<Vec<Orphan>> {
     Ok(out)
 }
 
+/// Alvos (`Intent`) das gravações em uso agora: a ativa, as sendo finalizadas ou recuperadas (pasta
+/// travada). Quem apaga uma biblioteca ou um cliente recusa se algum alvo aponta para ele. Pastas sem
+/// sidecar legível ou sem `Intent` ficam de fora (não dizem para onde vão).
+pub fn busy_targets(app: &App) -> Result<Vec<Intent>> {
+    let entries = match std::fs::read_dir(recording_root(&app.data_dir)) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let dir = entry.path();
+        if !dir.is_dir() || check_key(&entry.file_name().to_string_lossy()).is_err() || !is_locked(&dir) {
+            continue;
+        }
+        if let Some(intent) = Sidecar::read(&dir).ok().and_then(|sc| intent_of(&sc)) {
+            out.push(intent);
+        }
+    }
+    Ok(out)
+}
+
 // ------------------------------------------------------------------ chaves e pastas
 
 pub fn recording_root(data_dir: &Path) -> PathBuf {

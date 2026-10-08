@@ -27,8 +27,9 @@ Portuguese and Latin-American Spanish (Settings > Language).
 - **Audio cuts.** Mark parts of the audio to skip, such as off-topic tangents.
   The player skips them and re-transcription ignores them. The original audio
   files are never modified.
-- **Per-client glossary.** Terms and "wrong -> right" corrections, global or per
-  client, applied to the transcripts.
+- **Glossary in three layers.** Terms and "wrong -> right" corrections, global,
+  per company/project or per client (client overrides company, company overrides
+  global), applied to the transcripts.
 - **Free disk space.** Delete a call's audio and keep its transcript.
 - **Command line and agent skill.** The `tary` command and
   [`skills/tary/SKILL.md`](skills/tary/SKILL.md) let you, or an AI agent, record,

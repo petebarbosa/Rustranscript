@@ -246,16 +246,18 @@ impl RuleKind {
 #[serde(rename_all = "lowercase")]
 pub enum Scope {
     Global,
+    /// Empresa/projeto (a biblioteca): vale para todas as chamadas dela, com ou sem cliente.
+    Company,
     Client,
 }
 
-/// Regra do glossário. Os ids de regras globais e de cliente vivem em espaços separados:
-/// quem identifica uma regra é o par `(scope, id)` (e `library_id` para as de cliente).
+/// Regra do glossário. Os ids das regras de cada camada (global, empresa, cliente) vivem em espaços
+/// separados: quem identifica uma regra é o par `(scope, id)` (e `library_id` para as de empresa e de cliente).
 #[derive(Debug, Clone, Serialize)]
 pub struct Rule {
     pub id: i64,
     pub scope: Scope,
-    /// Só em regras de cliente.
+    /// Só em regras de empresa e de cliente.
     pub library_id: Option<i64>,
     pub client_id: Option<i64>,
     pub kind: RuleKind,
@@ -267,7 +269,8 @@ pub struct Rule {
     /// do cliente ou, em regra global, em `source_library_id`.
     pub source_edit_id: Option<i64>,
     pub source_library_id: Option<i64>,
-    /// Regra global escondida por uma de cliente com o mesmo padrão (não é aplicada na lista efetiva).
+    /// Regra escondida por uma de camada mais alta (cliente > empresa > global) com o mesmo tipo e
+    /// padrão; não é aplicada na lista efetiva.
     pub overridden: bool,
 }
 
@@ -316,8 +319,10 @@ pub struct BlockSuggestion {
     pub replacement: String,
     /// Em quantos OUTROS blocos da mesma versão o padrão ainda aparece.
     pub occurrences_in_call: usize,
-    /// Cliente da chamada (`null` na inbox/sem cliente: só dá para criar regra global).
+    /// Cliente da chamada (`null` na inbox/sem cliente: não dá para criar regra de cliente).
     pub client: Option<ClientRef>,
+    /// A chamada está numa empresa/projeto (não na inbox): dá para criar regra de empresa.
+    pub company: bool,
 }
 
 /// Resultado de editar um bloco: o bloco (campos no nível de cima, como antes) + sugestões.

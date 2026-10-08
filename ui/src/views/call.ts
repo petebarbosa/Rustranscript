@@ -682,7 +682,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     try { rep = await api.glossaryApply(libraryId, callId, null, true) }
     catch (e) { toast(describeGlossaryError(e), 'err'); return }
     if (!rep.blocks_changed) { toast(t('glossary.apply_none')); return }
-    const chip = (hit: Hit) => `<span class="rounded-full bg-white/5 px-2 py-0.5 text-[11px] text-zinc-400">${esc(hit.pattern)} → ${esc(hit.replacement)}${hit.count > 1 ? ` ×${hit.count}` : ''}${hit.scope ? ` · ${esc(t(hit.scope === 'client' ? 'glossary.origin_client' : 'glossary.origin_global'))}` : ''}</span>`
+    const chip = (hit: Hit) => `<span class="rounded-full bg-white/5 px-2 py-0.5 text-[11px] text-zinc-400">${esc(hit.pattern)} → ${esc(hit.replacement)}${hit.count > 1 ? ` ×${hit.count}` : ''}${hit.scope ? ` · ${esc(t(`glossary.origin_${hit.scope}`))}` : ''}</span>`
     const rows = rep.changes.map(c => {
       const df = diffWords(c.before, c.after)
       return `<li class="rounded-xl border border-white/10 bg-ink-950/60 px-3 py-2">
@@ -705,16 +705,19 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
   }
 
   /**
-   * Modal do glossário da chamada: regras do cliente (adicionar, editar e remover ali mesmo), globais só para leitura
-   * (recolhidas) e "Aplicar à chamada". É um <dialog> só: por isso a edição e a confirmação de remoção são inline,
+   * Modal do glossário da chamada: regras do cliente (adicionar, editar e remover ali mesmo), as da empresa e as globais
+   * só para leitura (recolhidas) e "Aplicar à chamada". É um <dialog> só: por isso a edição e a confirmação de remoção são inline,
    * e "Classificar"/"Aplicar" fecham este modal antes de abrir o seguinte.
    */
   async function glossaryDialog() {
     const clientId = d.client_id
     let all: Rule[] = []
-    const load = async () => { all = await api.glossaryList(clientId != null ? libraryId : null, clientId) }
+    // a inbox não tem camada de empresa nem de cliente: só as globais
+    const inInbox = store.libraries.find(l => l.id === libraryId)?.kind === 'inbox'
+    const load = async () => { all = await api.glossaryList(inInbox ? null : libraryId, clientId) }
     try { await load() } catch (e) { toast(describeGlossaryError(e), 'err'); return }
     const own = () => all.filter(r => r.scope === 'client')
+    const companyRules = all.filter(r => r.scope === 'company')
     const globals = all.filter(r => r.scope === 'global')
 
     // `{ id: null }` = regra nova; `{ id }` = editando essa; só um editor por vez
@@ -772,16 +775,19 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
         <ul class="mt-3 space-y-2 ${editing ? '' : 'max-h-[38vh] overflow-y-auto pr-1'}">${editing?.id === null ? editorHtml(null) : ''}${rows || (editing?.id === null ? '' : `<li class="rounded-xl border border-dashed border-white/10 px-4 py-6 text-center text-sm text-zinc-600">${esc(t('glossary.client_empty'))}</li>`)}</ul>`
     }
 
-    const globalHtml = () => {
-      const rows = globals.map(r => `<li class="flex items-center gap-3 ${r.overridden ? 'opacity-50' : ''}">
+    /** Camada só para leitura (empresa ou global), recolhida; as cobertas por uma mais específica saem riscadas. */
+    const readOnlyHtml = (list: Rule[], title: string, hint: string, empty: string, manage: string, href: string) => {
+      const rows = list.map(r => `<li class="flex items-center gap-3 ${r.overridden ? 'opacity-50' : ''}">
         <p class="min-w-0 flex-1 break-words font-mono text-sm">${ruleText(r, r.overridden ? 'line-through decoration-zinc-500' : '')}</p>${caseBadge(r)}</li>`).join('')
       return `<details class="${box}">
-        <summary class="cursor-pointer select-none px-4 py-2.5 text-sm font-semibold text-zinc-300 hover:text-white">${esc(t('glossary.global_rules'))} <span class="text-xs font-normal tabular-nums text-zinc-500">${fmtNumber(globals.length)}</span></summary>
+        <summary class="cursor-pointer select-none px-4 py-2.5 text-sm font-semibold text-zinc-300 hover:text-white">${esc(title)} <span class="text-xs font-normal tabular-nums text-zinc-500">${fmtNumber(list.length)}</span></summary>
         <div class="border-t border-white/5 px-4 py-3">
-          <p class="text-xs text-zinc-500">${esc(t('glossary.global_hint'))}</p>
-          <ul class="mt-2 max-h-[28vh] space-y-1.5 overflow-y-auto pr-1">${rows || `<li class="text-sm text-zinc-600">${esc(t('glossary.global_empty'))}</li>`}</ul>
-          <a href="#/glossary?global" data-to-glossary class="mt-3 inline-block text-xs text-violet-300 hover:underline">${esc(t('glossary.manage_global'))} →</a></div></details>`
+          <p class="text-xs text-zinc-500">${esc(hint)}</p>
+          <ul class="mt-2 max-h-[28vh] space-y-1.5 overflow-y-auto pr-1">${rows || `<li class="text-sm text-zinc-600">${esc(empty)}</li>`}</ul>
+          <a href="${href}" data-to-glossary class="mt-3 inline-block text-xs text-violet-300 hover:underline">${esc(manage)} →</a></div></details>`
     }
+    const companyHtml = () => inInbox ? '' : readOnlyHtml(companyRules, t('glossary.company_rules'), t('glossary.company_hint'), t('glossary.company_empty'), t('glossary.manage_company'), `#/glossary?lib=${libraryId}`)
+    const globalHtml = () => readOnlyHtml(globals, t('glossary.global_rules'), t('glossary.global_hint'), t('glossary.global_empty'), t('glossary.manage_global'), '#/glossary?global')
 
     function paint() {
       f.querySelector('[data-client]')!.innerHTML = clientHtml()
@@ -820,6 +826,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
 
     const body = `<p class="text-sm text-zinc-500">${esc(t('glossary.modal_intro'))}</p>
       <section data-client></section>
+      ${companyHtml()}
       ${globalHtml()}
       <p data-note aria-live="polite"></p>
       ${noTranscript() ? `<p class="rounded-xl border border-white/10 bg-ink-950/50 px-3 py-2 text-xs text-zinc-500">${esc(t('glossary.pending_note'))}</p>` : ''}`

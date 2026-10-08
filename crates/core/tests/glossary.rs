@@ -409,6 +409,7 @@ fn block_edit_suggestions_filter_covered_rules_and_count_occurrences() {
     assert_eq!(s.occurrences_in_call, 3);
     let c = s.client.as_ref().unwrap();
     assert_eq!((c.id, c.name.as_str()), (client.id, "Cliente Alfa"));
+    assert!(s.company, "chamada de empresa: dá para salvar a regra na empresa");
     let edit_id = edit.edit_id.unwrap();
     assert_eq!(lib.history(Some(call), 1).unwrap()[0].id, edit_id);
 
@@ -437,6 +438,7 @@ fn block_edit_suggestions_filter_covered_rules_and_count_occurrences() {
     let r = app.edit_block_text(&mut inbox, ib, "o Zenith caiu", Origin::Cli, false).unwrap();
     assert_eq!(r.suggestions.len(), 1);
     assert!(r.suggestions[0].client.is_none());
+    assert!(!r.suggestions[0].company, "a inbox não tem camada de empresa");
     // JSON: campos do bloco no nível de cima + edit_id + suggestions
     let v = serde_json::to_value(&r).unwrap();
     assert!(v["id"].is_i64() && v["text"].is_string() && v["edit_id"].is_i64() && v["suggestions"].is_array());
@@ -522,4 +524,264 @@ fn import_term_list_file() {
     std::fs::write(&bad, [b'a', 0xE9, b'\n']).unwrap();
     assert!(matches!(app.import_glossary_file(&bad, ImportScope::Global, None, true), Err(Error::Invalid(_))));
     assert!(matches!(app.import_glossary_file(&e.src.join("nao-existe.txt"), ImportScope::Global, None, true), Err(Error::NotFound(_))));
+}
+
+/// Importa uma chamada sintética de duas falas (`line` + "ok") e devolve o id dela na biblioteca.
+fn make_call(app: &App, e: &Env, library_id: Option<i64>, client_id: Option<i64>, key_time: &str, line: &str) -> i64 {
+    let dir = e._tmp.path().join(format!("src-{key_time}"));
+    write_call(&dir, &format!("call_2026-07-01_{key_time}_sintetica"), &[line, "ok"]);
+    import_dir(app, &dir, &ImportOptions { library_id, client_id, ..plain() });
+    let lib = app.open_library(library_id.unwrap_or(app.inbox_id().unwrap())).unwrap();
+    lib.call_id_by_key(&format!("call_2026-07-01_{key_time}")).unwrap().unwrap()
+}
+
+#[test]
+fn company_layer_sits_between_client_and_global() {
+    let e = env();
+    let app = App::open(&e.data).unwrap();
+    let acme = app.add_library("Acme", &e.company).unwrap();
+    let zenith = app.add_library("Zenith", &e._tmp.path().join("Zenith")).unwrap();
+    let (lib, zlib) = (app.open_library(acme.id).unwrap(), app.open_library(zenith.id).unwrap());
+    let (x, y) = (lib.add_client("Cliente X").unwrap(), lib.add_client("Cliente Y").unwrap());
+
+    // as chamadas nascem antes das regras; `apply_glossary` é que aplica
+    let no_client = make_call(&app, &e, Some(acme.id), None, "10-00-00", "o Orbit caiu");
+    let with_x = make_call(&app, &e, Some(acme.id), Some(x.id), "11-00-00", "o Orbit subiu");
+    let with_y = make_call(&app, &e, Some(acme.id), Some(y.id), "12-00-00", "o Orbit parou");
+    let other_company = make_call(&app, &e, Some(zenith.id), None, "13-00-00", "o Orbit voltou");
+    let in_inbox = make_call(&app, &e, None, None, "14-00-00", "o Orbit sumiu");
+
+    let global = app.add_global_rule(&RuleInput::replace("Orbit", "Orbix"), None).unwrap();
+    let company = lib.add_company_rule(&RuleInput::replace("orbit", "Orbital"), None).unwrap();
+    assert_eq!((company.scope, company.library_id, company.client_id), (Scope::Company, Some(acme.id), None));
+    lib.add_client_rule(x.id, &RuleInput::replace("ORBIT", "Cliente-X"), None).unwrap();
+
+    // visões mescladas: cliente, empresa, global; o que está debaixo e repetido some
+    let view = |l: &Library, c: Option<i64>| app.merged_rules(l, c).unwrap().iter().map(|r| (r.scope, r.overridden)).collect::<Vec<_>>();
+    assert_eq!(view(&lib, None), [(Scope::Company, false), (Scope::Global, true)]);
+    assert_eq!(view(&lib, Some(y.id)), [(Scope::Company, false), (Scope::Global, true)]);
+    assert_eq!(view(&lib, Some(x.id)), [(Scope::Client, false), (Scope::Company, true), (Scope::Global, true)]);
+    assert_eq!(view(&zlib, None), [(Scope::Global, false)], "outra empresa: só a global");
+    let eff = app.effective_rules(&lib, None).unwrap();
+    assert_eq!((eff.len(), eff[0].id, eff[0].scope), (1, company.id, Scope::Company));
+
+    let apply = |lib_id: i64, call: i64| {
+        let mut l = app.open_library(lib_id).unwrap();
+        let r = app.apply_glossary(&mut l, call, None, Origin::Cli, false).unwrap();
+        (texts(&l, call)[0].clone(), r.changes.first().and_then(|c| c.rules.first()).map(|h| (h.scope, h.rule_id)))
+    };
+    // empresa, sem cliente: a regra da empresa; com cliente sem regra própria: idem
+    assert_eq!(apply(acme.id, no_client), ("o Orbital caiu".into(), Some((Some(Scope::Company), Some(company.id)))));
+    assert_eq!(apply(acme.id, with_y).0, "o Orbital parou");
+    // cliente com a mesma chave vence a empresa e a global
+    assert_eq!(apply(acme.id, with_x).0, "o Cliente-X subiu");
+    // outra empresa e a inbox: a global
+    assert_eq!(apply(zenith.id, other_company), ("o Orbix voltou".into(), Some((Some(Scope::Global), Some(global.id)))));
+    assert_eq!(apply(app.inbox_id().unwrap(), in_inbox).0, "o Orbix sumiu");
+}
+
+#[test]
+fn company_layer_is_used_when_importing_new_calls() {
+    let e = env();
+    let app = App::open(&e.data).unwrap();
+    let acme = app.add_library("Acme", &e.company).unwrap();
+    let lib = app.open_library(acme.id).unwrap();
+    app.add_global_rule(&RuleInput::replace("Orbit", "Orbix"), None).unwrap();
+    lib.add_company_rule(&RuleInput::replace("Orbit", "Orbital"), None).unwrap();
+    drop(lib);
+    // sem cliente: a empresa vale já na importação
+    let call = make_call(&app, &e, Some(acme.id), None, "10-00-00", "o Orbit caiu");
+    assert_eq!(texts(&app.open_library(acme.id).unwrap(), call)[0], "o Orbital caiu");
+    // inbox: só a global
+    let call = make_call(&app, &e, None, None, "11-00-00", "o Orbit caiu");
+    assert_eq!(texts(&app.open_library(app.inbox_id().unwrap()).unwrap(), call)[0], "o Orbix caiu");
+}
+
+#[test]
+fn inbox_has_no_company_layer() {
+    let e = env();
+    let app = App::open(&e.data).unwrap();
+    app.add_global_rule(&RuleInput::replace("Orbit", "Orbix"), None).unwrap();
+    let inbox = app.open_library(app.inbox_id().unwrap()).unwrap();
+    assert!(matches!(inbox.add_company_rule(&RuleInput::term("Acme"), None), Err(Error::Invalid(_))));
+    assert!(matches!(
+        app.import_glossary_text("Acme\n", ImportScope::Company { library_id: inbox.id() }, None, false),
+        Err(Error::Invalid(_))
+    ));
+    // mesmo que a tabela tenha algo (banco editado à mão), a inbox ignora
+    inbox.conn.execute("INSERT INTO glossary_library (kind, pattern, replacement, created_at) VALUES ('replace', 'Orbit', 'Perdido', 't')", []).unwrap();
+    assert!(inbox.company_rules().unwrap().is_empty());
+    let merged = app.merged_rules(&inbox, None).unwrap();
+    assert!(merged.iter().all(|r| r.scope == Scope::Global && !r.overridden));
+    assert_eq!(app.prompt_terms(&inbox, None).unwrap(), Vec::<String>::new());
+    // id inexistente
+    let acme = app.add_library("Acme", &e.company).unwrap();
+    let lib = app.open_library(acme.id).unwrap();
+    assert!(matches!(lib.remove_company_rule(1), Err(Error::NotFound(_))));
+    assert!(matches!(lib.update_company_rule(1, &RuleInput::term("x")), Err(Error::NotFound(_))));
+}
+
+#[test]
+fn company_rules_crud_and_validation() {
+    let e = env();
+    let app = App::open(&e.data).unwrap();
+    let acme = app.add_library("Acme", &e.company).unwrap();
+    let lib = app.open_library(acme.id).unwrap();
+    let r = lib.add_company_rule(&RuleInput::replace("Zenit", "Zenith"), Some(5)).unwrap();
+    assert_eq!((r.source_edit_id, r.kind), (Some(5), RuleKind::Replace));
+    assert!(matches!(lib.add_company_rule(&RuleInput::replace("zenit", "Outro"), None), Err(Error::Conflict(_))));
+    assert!(matches!(lib.add_company_rule(&RuleInput::replace("a", "a"), None), Err(Error::Invalid(_))));
+    // o termo de mesmo padrão não conflita com a substituição
+    assert!(lib.add_company_rule(&RuleInput::term("Zenit"), None).is_ok());
+    let u = lib.update_company_rule(r.id, &RuleInput::replace("Zenit", "Zénith")).unwrap();
+    assert_eq!(u.replacement.as_deref(), Some("Zénith"));
+    // ids de camadas diferentes vivem em espaços separados: o id 1 da empresa não é o id 1 do cliente
+    let c = lib.add_client("Cliente").unwrap();
+    assert!(matches!(lib.client_rule(r.id), Err(Error::NotFound(_))));
+    let cr = lib.add_client_rule(c.id, &RuleInput::term("Kafka"), None).unwrap();
+    assert_eq!(cr.id, r.id);
+    assert_eq!(lib.remove_company_rule(r.id).unwrap().pattern, "Zenit");
+    assert_eq!(lib.company_rules().unwrap().len(), 1);
+    assert_eq!(lib.client_rules(c.id).unwrap().len(), 1, "remover da empresa não encosta no cliente");
+}
+
+#[test]
+fn promote_client_to_company_and_company_to_global() {
+    let e = env();
+    let app = App::open(&e.data).unwrap();
+    let acme = app.add_library("Acme", &e.company).unwrap();
+    let lib = app.open_library(acme.id).unwrap();
+    let c = lib.add_client("Cliente").unwrap();
+
+    // cliente → empresa: cria na empresa (com a origem) e remove a cópia
+    let cr = lib.add_client_rule(c.id, &RuleInput::replace("Zenit", "Zenith"), Some(77)).unwrap();
+    let p = lib.promote_client_rule(cr.id).unwrap();
+    assert_eq!((p.scope, p.pattern.as_str(), p.source_edit_id, p.library_id), (Scope::Company, "Zenit", Some(77), Some(acme.id)));
+    assert!(lib.client_rules(c.id).unwrap().is_empty());
+    assert_eq!(lib.company_rules().unwrap().len(), 1);
+    // regra idêntica já na empresa: só remove a cópia
+    lib.add_client_rule(c.id, &RuleInput::replace("zenit", "Zenith"), None).unwrap();
+    let id = lib.client_rules(c.id).unwrap()[0].id;
+    let again = lib.promote_client_rule(id).unwrap();
+    assert_eq!(again.id, p.id);
+    assert!(lib.client_rules(c.id).unwrap().is_empty());
+    assert_eq!(lib.company_rules().unwrap().len(), 1, "sem duplicata");
+    // outra substituição na empresa: conflito, e nada é removido
+    let diff = lib.add_client_rule(c.id, &RuleInput::replace("zenit", "Outro"), None).unwrap();
+    assert!(matches!(lib.promote_client_rule(diff.id), Err(Error::Conflict(_))));
+    assert_eq!(lib.client_rules(c.id).unwrap().len(), 1, "conflito não remove a cópia");
+    assert_eq!(lib.company_rules().unwrap().len(), 1);
+    assert!(matches!(lib.promote_client_rule(9999), Err(Error::NotFound(_))));
+    // a inbox não tem camada de empresa
+    let inbox = app.open_library(app.inbox_id().unwrap()).unwrap();
+    assert!(matches!(inbox.promote_client_rule(1), Err(Error::Invalid(_))));
+
+    // empresa → global: cria a global (origem com a biblioteca) e remove a da empresa
+    let g = app.promote_company_rule(&lib, p.id).unwrap();
+    assert_eq!((g.scope, g.pattern.as_str(), g.source_edit_id, g.source_library_id), (Scope::Global, "Zenit", Some(77), Some(acme.id)));
+    assert!(lib.company_rules().unwrap().is_empty());
+    // global idêntica já existe: só remove a da empresa
+    let same = lib.add_company_rule(&RuleInput::replace("ZENIT", "Zenith"), None).unwrap();
+    let kept = app.promote_company_rule(&lib, same.id).unwrap();
+    assert_eq!(kept.id, g.id);
+    assert!(lib.company_rules().unwrap().is_empty());
+    assert_eq!(app.global_rules().unwrap().len(), 1);
+    // global com outra substituição: conflito, a da empresa fica
+    let diff = lib.add_company_rule(&RuleInput::replace("zenit", "Terceiro"), None).unwrap();
+    assert!(matches!(app.promote_company_rule(&lib, diff.id), Err(Error::Conflict(_))));
+    assert_eq!(lib.company_rules().unwrap().len(), 1);
+    assert_eq!(app.global_rules().unwrap().len(), 1);
+    assert!(matches!(app.promote_company_rule(&lib, 9999), Err(Error::NotFound(_))));
+
+    // cliente → global continua valendo
+    let cr = lib.add_client_rule(c.id, &RuleInput::term("Kafka"), Some(3)).unwrap();
+    let g = app.promote_rule(&lib, cr.id).unwrap();
+    assert_eq!((g.scope, g.pattern.as_str()), (Scope::Global, "Kafka"));
+    assert_eq!(lib.client_rules(c.id).unwrap().len(), 1, "sobra só a regra em conflito de antes");
+}
+
+#[test]
+fn import_into_company_scope_and_prompt_terms_order() {
+    let e = env();
+    std::fs::create_dir_all(&e.src).unwrap();
+    let file = e.src.join("termos.txt");
+    std::fs::write(&file, "# lista\nZenith Service\norbit -> Orbital\nZenith Service\n").unwrap();
+    let app = App::open(&e.data).unwrap();
+    let acme = app.add_library("Acme", &e.company).unwrap();
+    let lib = app.open_library(acme.id).unwrap();
+    let c = lib.add_client("Cliente").unwrap();
+    let scope = ImportScope::Company { library_id: acme.id };
+    let dry = app.import_glossary_file(&file, scope, None, true).unwrap();
+    assert_eq!((dry.added, dry.skipped), (2, 1));
+    assert!(lib.company_rules().unwrap().is_empty(), "simulação não grava");
+    let r = app.import_glossary_file(&file, scope, None, false).unwrap();
+    assert_eq!((r.added, r.skipped, r.invalid), (2, 1, 0));
+    assert_eq!(lib.company_rules().unwrap().len(), 2);
+    assert!(lib.client_rules(c.id).unwrap().is_empty() && app.global_rules().unwrap().is_empty());
+    assert_eq!(app.import_glossary_file(&file, scope, None, false).unwrap().added, 0, "reimportar é idempotente");
+    assert!(matches!(app.import_glossary_file(&file, ImportScope::Company { library_id: 9999 }, None, true), Err(Error::NotFound(_))));
+
+    // termos: cliente, depois empresa, depois global; repetidos (sem caixa) saem da camada de baixo
+    lib.add_client_rule(c.id, &RuleInput::term("Kafka"), None).unwrap();
+    app.add_global_rule(&RuleInput::term("Kubernetes"), None).unwrap();
+    app.add_global_rule(&RuleInput::term("zenith service"), None).unwrap();
+    assert_eq!(app.prompt_terms(&lib, Some(c.id)).unwrap(), ["Kafka", "Zenith Service", "Kubernetes"]);
+    assert_eq!(app.prompt_terms(&lib, None).unwrap(), ["Zenith Service", "Kubernetes"]);
+    let inbox = app.open_library(app.inbox_id().unwrap()).unwrap();
+    assert_eq!(app.prompt_terms(&inbox, None).unwrap(), ["Kubernetes", "zenith service"], "a inbox só vê as globais");
+}
+
+#[test]
+fn suggestions_are_covered_by_company_rules_and_flag_company() {
+    let e = env();
+    let app = App::open(&e.data).unwrap();
+    let acme = app.add_library("Acme", &e.company).unwrap();
+    let call = make_call(&app, &e, Some(acme.id), None, "10-00-00", "o Zenit Service caiu");
+    let mut lib = app.open_library(acme.id).unwrap();
+    let b1 = lib.block_id_by_seq(call, 1).unwrap();
+    let edit = app.edit_block_text(&mut lib, b1, "o Zenith Service caiu", Origin::Ui, false).unwrap();
+    assert_eq!(edit.suggestions.len(), 1);
+    assert!(edit.suggestions[0].company && edit.suggestions[0].client.is_none());
+    // salvar a sugestão na empresa guarda a edição de origem e cobre a próxima edição parecida
+    let rule = lib.add_company_rule(&RuleInput::replace("Zenit", "Zenith"), edit.edit_id).unwrap();
+    assert_eq!(rule.source_edit_id, edit.edit_id);
+    let call2 = make_call(&app, &e, Some(acme.id), None, "12-00-00", "de novo o Zenit Service");
+    let b2 = lib.block_id_by_seq(call2, 1).unwrap();
+    let again = app.edit_block_text(&mut lib, b2, "de novo o Zenith Service", Origin::Ui, false).unwrap();
+    assert!(again.suggestions.is_empty(), "coberta pela regra da empresa");
+    // na inbox não há empresa
+    let in_inbox = make_call(&app, &e, None, None, "11-00-00", "o Zenit caiu");
+    let mut inbox = app.open_library(app.inbox_id().unwrap()).unwrap();
+    let ib = inbox.block_id_by_seq(in_inbox, 1).unwrap();
+    let r = app.edit_block_text(&mut inbox, ib, "o Zenith caiu", Origin::Cli, false).unwrap();
+    assert!(!r.suggestions[0].company);
+}
+
+#[test]
+fn company_glossary_table_is_added_to_existing_libraries() {
+    let e = env();
+    let n = schema::LIBRARY_MIGRATIONS.len();
+    let has_table = |conn: &rusqlite::Connection| -> i64 {
+        conn.query_row("SELECT count(*) FROM sqlite_master WHERE name = 'glossary_library'", [], |r| r.get(0)).unwrap()
+    };
+    // library.db criado antes da camada de empresa (sem a última migração), com um cliente e uma regra
+    std::fs::create_dir_all(&e.company).unwrap();
+    {
+        let conn = db::open(&e.company.join("library.db"), &schema::LIBRARY_MIGRATIONS[..n - 1]).unwrap();
+        assert_eq!(has_table(&conn), 0);
+        assert_eq!(conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), n as i64 - 1);
+        conn.execute("INSERT INTO clients (name, slug, created_at) VALUES ('Cliente', 'cliente', 't')", []).unwrap();
+        conn.execute("INSERT INTO glossary_client (client_id, kind, pattern, created_at) VALUES (1, 'term', 'Kafka', 't')", []).unwrap();
+    }
+    let app = App::open(&e.data).unwrap();
+    let row = app.add_library("Empresa", &e.company).unwrap(); // adota a pasta existente
+    let lib = app.open_library(row.id).unwrap();
+    assert_eq!(has_table(&lib.conn), 1);
+    assert_eq!(lib.conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), n as i64);
+    assert!(lib.company_rules().unwrap().is_empty(), "a tabela nasce vazia");
+    assert_eq!(lib.client_rules(1).unwrap()[0].pattern, "Kafka", "o que existia fica");
+    let r = lib.add_company_rule(&RuleInput::term("Zenith"), None).unwrap();
+    assert_eq!((r.scope, r.id), (Scope::Company, 1));
+    drop(lib);
+    assert_eq!(app.open_library(row.id).unwrap().company_rules().unwrap().len(), 1, "reabrir não migra de novo");
 }

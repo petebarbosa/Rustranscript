@@ -71,12 +71,13 @@ export interface HistoryEntry {
 }
 // ---- glossário (ver GLOSSARY_CONTRACT.md)
 export type RuleKind = 'term' | 'replace'
-export type Scope = 'global' | 'client'
+/** Camadas do glossário, da mais ampla à mais específica; cliente > empresa > global. */
+export type Scope = 'global' | 'company' | 'client'
 export interface Rule {
   id: number; scope: Scope; library_id: number | null; client_id: number | null
   kind: RuleKind; pattern: string; replacement: string | null; case_sensitive: boolean
   created_at: string; source_edit_id: number | null; source_library_id: number | null
-  /** global escondida por uma regra de cliente de mesmo tipo+padrão */
+  /** escondida por uma regra de camada mais específica (cliente > empresa > global) de mesmo tipo+padrão */
   overridden: boolean
 }
 export interface Hit { scope: Scope | null; rule_id: number | null; pattern: string; replacement: string; count: number }
@@ -89,8 +90,10 @@ export interface ClientRef { id: number; name: string }
 export interface BlockSuggestion {
   pattern: string; replacement: string
   occurrences_in_call: number
-  /** cliente da chamada; null (sem cliente) => só dá para criar regra global */
+  /** cliente da chamada; null (sem cliente) => não dá para criar regra de cliente */
   client: ClientRef | null
+  /** a chamada está numa empresa/projeto (não na inbox): dá para criar regra de empresa */
+  company: boolean
 }
 export interface BlockEdit extends BlockInfo {
   /** edit_history.id da edição (null se o texto não mudou); vai como `sourceEditId` */
@@ -368,6 +371,7 @@ export const api = {
     call<ImportReport>('import_preview', { paths, libraryId }),
   importStart: (paths: string[], libraryId: number | null, clientId: number | null, convertAudio: boolean) =>
     call<void>('import_start', { paths, libraryId, clientId, convertAudio }),
+  /** Sem `libraryId`: as globais. Só com ele: as da empresa + globais. Com `clientId` também: cliente + empresa + globais. */
   glossaryList: (libraryId: number | null, clientId: number | null, kind?: RuleKind) =>
     call<Rule[]>('glossary_list', { libraryId, clientId, kind: kind ?? null }),
   glossaryAdd: (a: RuleInput & { scope: Scope; libraryId?: number | null; clientId?: number | null; sourceEditId?: number | null }) =>
@@ -382,7 +386,9 @@ export const api = {
     }),
   glossaryRemove: (scope: Scope, libraryId: number | null, id: number) =>
     call<Rule>('glossary_remove', { scope, libraryId, id }),
-  glossaryPromote: (libraryId: number, id: number) => call<Rule>('glossary_promote', { libraryId, id }),
+  /** Sobe uma regra de `scope` (camada de origem) para `to`: cliente → global, cliente → empresa ou empresa → global. */
+  glossaryPromote: (libraryId: number, id: number, scope: Scope = 'client', to: Scope = 'global') =>
+    call<Rule>('glossary_promote', { libraryId, id, scope, to }),
   glossaryApply: (libraryId: number, callId: number, transcriptId: number | null, dryRun: boolean) =>
     call<ApplyReport>('glossary_apply', { libraryId, callId, transcriptId, dryRun }),
   glossaryImportFile: (a: { path: string; scope: Scope; libraryId?: number | null; clientId?: number | null; kind?: RuleKind | null; dryRun: boolean }) =>

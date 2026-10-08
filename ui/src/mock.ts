@@ -414,30 +414,34 @@ const handlers: Record<string, (a: Args) => unknown> = {
 }
 
 // ---------------------------------------------------------------- glossário
-// Duas camadas (global / cliente); ids em espaços separados. Motor simplificado: palavra inteira,
-// sem caixa, uma passada, o padrão mais longo vence.
+// Três camadas (global / empresa / cliente: cliente > empresa > global); ids em espaços separados. Motor
+// simplificado: palavra inteira, sem caixa, uma passada, o padrão mais longo vence.
 const rules: Rule[] = []
 let gSeq = 0
-const cSeq = new Map<number, number>() // por biblioteca
+const cSeq = new Map<string, number>() // por camada e biblioteca
 const rkey = (r: Pick<Rule, 'kind' | 'pattern'>) => r.kind + '|' + fold(norm(r.pattern))
 const layerOf = (scope: string, libraryId: number | null) => rules.filter(r => r.scope === scope && (scope === 'global' || r.library_id === libraryId))
 
 function addRule(a: Args): Rule {
   const scope = a.scope as Rule['scope']
-  if (scope !== 'global' && scope !== 'client') throw { code: 'invalid', detail: 'unknown scope' }
+  if (scope !== 'global' && scope !== 'company' && scope !== 'client') throw { code: 'invalid', detail: 'unknown scope' }
   if (a.kind !== 'term' && a.kind !== 'replace') throw { code: 'invalid', detail: 'unknown kind' }
   const pattern = norm(a.pattern ?? '')
   const replacement = a.kind === 'replace' ? norm(a.replacement ?? '') : null
   if (!pattern || pattern.length > 200) throw { code: 'invalid', detail: 'pattern is empty or too long' }
   if (a.kind === 'replace' && (!replacement || replacement === pattern || replacement.length > 500)) throw { code: 'invalid', detail: 'bad replacement' }
-  if (scope === 'client') {
+  if (scope !== 'global') {
     if (a.libraryId == null) throw { code: 'invalid', detail: 'libraryId is required' }
-    if (a.clientId == null || lib(a.libraryId).kind === 'inbox' || !clients.some(c => c.id === a.clientId)) throw { code: 'not_found', detail: 'client' }
+    if (scope === 'company' && lib(a.libraryId).kind === 'inbox') throw { code: 'invalid', detail: 'unclassified calls have no company glossary' }
   }
-  const libraryId = scope === 'client' ? a.libraryId : null
+  if (scope === 'client' && (a.clientId == null || lib(a.libraryId).kind === 'inbox' || !clients.some(c => c.id === a.clientId))) throw { code: 'not_found', detail: 'client' }
+  const libraryId = scope === 'global' ? null : a.libraryId
   if (layerOf(scope, libraryId).some(r => r.id !== a.id && rkey(r) === rkey({ kind: a.kind, pattern }))) throw { code: 'conflict', detail: 'rule already exists' }
   let id = a.id
-  if (id == null) id = scope === 'global' ? ++gSeq : (cSeq.set(libraryId, (cSeq.get(libraryId) ?? 0) + 1), cSeq.get(libraryId)!)
+  if (id == null) {
+    const k = `${scope}:${libraryId}`
+    id = scope === 'global' ? ++gSeq : (cSeq.set(k, (cSeq.get(k) ?? 0) + 1), cSeq.get(k)!)
+  }
   return {
     id, scope, library_id: libraryId, client_id: scope === 'client' ? a.clientId : null, kind: a.kind, pattern, replacement,
     case_sensitive: !!a.caseSensitive, created_at: now(), source_edit_id: a.sourceEditId ?? null,
@@ -449,22 +453,35 @@ function findRule(scope: string, libraryId: number | null, id: number) {
   if (!r) throw { code: 'not_found', detail: 'rule' }
   return r
 }
-/** Regras em vigor: do cliente primeiro; as globais cobertas por uma do cliente saem com `overridden`. */
+/**
+ * Regras em vigor: cliente, empresa, global. Uma regra de camada mais baixa sai com `overridden` quando uma
+ * mais alta tem o mesmo tipo e padrão. A inbox (sem empresa e sem cliente) só tem as globais.
+ */
 function merged(libraryId: number | null, clientId: number | null): Rule[] {
   const globals = layerOf('global', null)
-  if (libraryId == null || clientId == null) return globals.map(r => ({ ...r }))
-  const own = layerOf('client', libraryId).filter(r => r.client_id === clientId)
-  const keys = new Set(own.map(rkey))
-  return [...own.map(r => ({ ...r })), ...globals.map(r => ({ ...r, overridden: keys.has(rkey(r)) }))]
+  if (libraryId == null || lib(libraryId).kind === 'inbox') return globals.map(r => ({ ...r }))
+  const client = clientId == null ? [] : layerOf('client', libraryId).filter(r => r.client_id === clientId)
+  const company = layerOf('company', libraryId)
+  const clientKeys = new Set(client.map(rkey))
+  const above = new Set([...clientKeys, ...company.map(rkey)])
+  return [
+    ...client.map(r => ({ ...r })),
+    ...company.map(r => ({ ...r, overridden: clientKeys.has(rkey(r)) })),
+    ...globals.map(r => ({ ...r, overridden: above.has(rkey(r)) })),
+  ]
 }
 
-// regras sintéticas de partida: o Cliente Alfa tem as suas (a chamada 3 dá prévia ao aplicar) e há duas globais
+// regras sintéticas de partida: o Cliente Alfa tem as suas (a chamada 3 dá prévia ao aplicar), a empresa dele tem
+// duas (uma sobrescreve a global "Alfa Cloud") e há três globais
 for (const a of [
   { scope: 'client', libraryId: 2, clientId: 1, kind: 'replace', pattern: 'fila de pagamentos', replacement: 'fila de cobrança' },
   { scope: 'client', libraryId: 2, clientId: 1, kind: 'replace', pattern: 'serviço de notificações', replacement: 'Serviço de Alertas', caseSensitive: true },
   { scope: 'client', libraryId: 2, clientId: 1, kind: 'term', pattern: 'Alfa Cobrança' },
   { scope: 'global', kind: 'replace', pattern: 'Gate Wei Service', replacement: 'Gateway Service' },
   { scope: 'global', kind: 'term', pattern: 'Gateway Service' },
+  { scope: 'global', kind: 'replace', pattern: 'Alfa Cloud', replacement: 'Alfa Nuvem' },
+  { scope: 'company', libraryId: 2, kind: 'replace', pattern: 'alfa cloud', replacement: 'Alfa Cloud' },
+  { scope: 'company', libraryId: 2, kind: 'term', pattern: 'Projeto Aurora' },
 ]) rules.push(addRule(a))
 
 const edge = (c: string) => /[\p{L}\p{N}]/u.test(c)
@@ -518,6 +535,7 @@ function suggest(libraryId: number, c: Call, blockId: number, oldText: string, n
     pattern, replacement,
     occurrences_in_call: live(c).filter(b => b.id !== blockId && re.test(b.text)).length,
     client: client ? { id: client.id, name: client.name } : null,
+    company: lib(libraryId).kind !== 'inbox',
   }]
 }
 
@@ -534,13 +552,20 @@ Object.assign(handlers, {
     return { ...old }
   },
   glossary_remove: (a: Args) => { const r = findRule(a.scope, a.libraryId ?? null, a.id); rules.splice(rules.indexOf(r), 1); return r },
+  // `scope` = camada de origem (padrão: cliente) e `to` = destino (padrão: global): cliente → global, cliente → empresa, empresa → global
   glossary_promote: (a: Args) => {
-    const r = findRule('client', a.libraryId, a.id)
-    const twin = layerOf('global', null).find(g => rkey(g) === rkey(r))
-    if (twin && (twin.replacement !== r.replacement)) throw { code: 'conflict', detail: 'global rule differs' }
+    const from: string = a.scope ?? 'client', to: string = a.to ?? 'global'
+    if (!((from === 'client' && (to === 'global' || to === 'company')) || (from === 'company' && to === 'global'))) throw { code: 'invalid', detail: 'a rule only moves up' }
+    const r = findRule(from, a.libraryId, a.id)
+    const twin = layerOf(to, to === 'global' ? null : a.libraryId).find(g => rkey(g) === rkey(r))
+    if (twin && (twin.replacement !== r.replacement || twin.case_sensitive !== r.case_sensitive)) throw { code: 'conflict', detail: `${to} rule differs` }
     rules.splice(rules.indexOf(r), 1)
     if (twin) return { ...twin }
-    const g = { ...r, id: ++gSeq, scope: 'global' as const, library_id: null, client_id: null, source_library_id: null }
+    const k = `company:${a.libraryId}`
+    const up = to === 'global'
+      ? { id: ++gSeq, scope: 'global' as const, library_id: null, client_id: null, source_library_id: r.source_edit_id != null ? a.libraryId : null }
+      : (cSeq.set(k, (cSeq.get(k) ?? 0) + 1), { id: cSeq.get(k)!, scope: 'company' as const, library_id: a.libraryId, client_id: null, source_library_id: null })
+    const g = { ...r, ...up }
     rules.push(g)
     return g
   },
@@ -566,8 +591,10 @@ Object.assign(handlers, {
   },
   glossary_import_file: (a: Args) => {
     if (!a.path) throw { code: 'not_found', detail: 'file' }
-    if (a.scope === 'client' && (a.libraryId == null || a.clientId == null)) throw { code: 'invalid', detail: 'libraryId is required' }
-    const libraryId = a.scope === 'client' ? a.libraryId : null
+    if (a.scope !== 'global' && a.libraryId == null) throw { code: 'invalid', detail: 'libraryId is required' }
+    if (a.scope === 'client' && a.clientId == null) throw { code: 'invalid', detail: 'clientId is required' }
+    if (a.scope === 'company' && lib(a.libraryId).kind === 'inbox') throw { code: 'invalid', detail: 'unclassified calls have no company glossary' }
+    const libraryId = a.scope === 'global' ? null : a.libraryId
     const seen = new Set<string>()
     const entries: GlossaryImportEntry[] = []
     SAMPLE_LIST.forEach((raw, i) => {
@@ -1146,7 +1173,7 @@ function deletion(a: Args, clientId: number | null): Deletion | Promise<Deletion
   const target = rec.cur?.intent
   if (target && target.library_id === l.id && (clientId == null || target.client_id === clientId)) throw bad('conflict', 'a recording to this destination is in progress or being finalized')
   const mode: DeleteMode | null = a.mode ?? null
-  const glossary = rules.filter(r => r.scope === 'client' && r.library_id === l.id && (clientId == null || r.client_id === clientId)).length
+  const glossary = rules.filter(r => r.library_id === l.id && (r.scope === 'client' ? clientId == null || r.client_id === clientId : r.scope === 'company' && clientId == null)).length
   const keepBlocked = clientId == null && mine.some(c => calls.some(x => x.library_id === 1 && x.key === c.key)) ? 'call already exists in the inbox' : null
   const out: Deletion = {
     dry_run: !!a.dryRun, library_id: l.id, client_id: clientId, name: cl?.name ?? l.name, mode, calls: mine.length,
@@ -1164,7 +1191,7 @@ function deletion(a: Args, clientId: number | null): Deletion | Promise<Deletion
     }
     for (let i = rules.length - 1; i >= 0; i--) {
       const r = rules[i]
-      if (r.scope === 'client' && r.library_id === l.id && (clientId == null || r.client_id === clientId)) rules.splice(i, 1)
+      if (r.library_id === l.id && (r.scope === 'client' ? clientId == null || r.client_id === clientId : r.scope === 'company' && clientId == null)) rules.splice(i, 1)
       else if (clientId == null && r.scope === 'global' && r.source_library_id === l.id) Object.assign(r, { source_edit_id: null, source_library_id: null })
     }
     if (clientId == null) {

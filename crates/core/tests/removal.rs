@@ -180,6 +180,7 @@ fn client_delete_removes_calls_audio_rows_search_and_jobs() {
     e.call(c.id, "call_2026-01-02_10-00-00", Some(x.id), "bravo");
     e.call(c.id, "call_2026-01-03_10-00-00", Some(y.id), "charlie");
     lib.add_client_rule(x.id, &RuleInput::term("zenit"), None).unwrap();
+    lib.add_company_rule(&RuleInput::term("acme"), None).unwrap();
     drop(lib);
     assert_eq!(search::search(&e.app, "alfa", 10).unwrap().len(), 1);
 
@@ -193,6 +194,7 @@ fn client_delete_removes_calls_audio_rows_search_and_jobs() {
         assert_eq!(count(&lib, table), 1, "{table}");
     }
     assert_eq!(count(&lib, "glossary_client"), 0);
+    assert_eq!(count(&lib, "glossary_library"), 1, "apagar um cliente não encosta no glossário da empresa");
     assert_eq!(lib.clients().unwrap().len(), 1);
     assert_eq!(e.jobs(c.id), 1, "tarefas das chamadas apagadas sumiram");
     // busca: o texto apagado não volta, nem pelo índice, nem pela busca global
@@ -497,6 +499,9 @@ fn dry_run_returns_the_counts_and_changes_nothing() {
     lib.add_client_rule(x.id, &RuleInput::term("zenit"), None).unwrap();
     lib.add_client_rule(x.id, &RuleInput::term("polar"), None).unwrap();
     lib.add_client_rule(y.id, &RuleInput::term("outro"), None).unwrap();
+    // a camada da empresa também entra na contagem de apagar a empresa (e só nela)
+    lib.add_company_rule(&RuleInput::term("acme"), None).unwrap();
+    lib.add_company_rule(&RuleInput::replace("zenit", "zenith"), None).unwrap();
     drop(lib);
     e.call(c.id, "call_2026-01-01_10-00-00", Some(x.id), "alfa");
     e.call(c.id, "call_2026-01-02_10-00-00", Some(y.id), "bravo");
@@ -516,7 +521,7 @@ fn dry_run_returns_the_counts_and_changes_nothing() {
 
     let r = removal::delete_library(&e.app, c.id, None, true).unwrap();
     assert!(r.dry_run);
-    assert_eq!((r.calls, r.audio_bytes, r.clients, r.glossary_entries, r.moved, r.deleted, r.folder_removed), (3, 8000, 2, 3, 0, 0, false));
+    assert_eq!((r.calls, r.audio_bytes, r.clients, r.glossary_entries, r.moved, r.deleted, r.folder_removed), (3, 8000, 2, 5, 0, 0, false));
     assert_eq!(r.name, "Empresa");
     assert!(r.keep_blocked.is_none());
 

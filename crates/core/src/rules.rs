@@ -1,5 +1,5 @@
-//! Glossário, parte com banco: regras globais (`app.db`) e de cliente (`library.db`), fusão
-//! das duas camadas, aplicação a uma chamada (com lote no histórico), sugestões a partir de
+//! Glossário, parte com banco: regras globais (`app.db`), de empresa/projeto e de cliente
+//! (`library.db`), fusão das três camadas (cliente > empresa > global), aplicação a uma chamada (com lote no histórico), sugestões a partir de
 //! edições, importação de listas de termos e termos do prompt. A lógica pura fica em `glossary.rs`.
 use std::collections::HashSet;
 use std::path::Path;
@@ -80,6 +80,7 @@ pub struct RuleSource {
 #[derive(Debug, Clone, Copy)]
 pub enum ImportScope {
     Global,
+    Company { library_id: i64 },
     Client { library_id: i64, client_id: i64 },
 }
 
@@ -88,11 +89,23 @@ pub enum ImportScope {
 #[derive(Clone, Copy)]
 enum Owner {
     Global,
+    Company { library_id: i64 },
     Client { library_id: i64, client_id: i64 },
 }
 
 const GLOBAL_COLS: &str = "id, kind, pattern, replacement, case_sensitive, created_at, source_edit_id, source_library_id";
 const CLIENT_COLS: &str = "id, client_id, kind, pattern, replacement, case_sensitive, created_at, source_edit_id";
+const COMPANY_COLS: &str = "id, kind, pattern, replacement, case_sensitive, created_at, source_edit_id";
+
+impl Owner {
+    fn table(self) -> &'static str {
+        match self {
+            Owner::Global => "glossary_global",
+            Owner::Company { .. } => "glossary_library",
+            Owner::Client { .. } => "glossary_client",
+        }
+    }
+}
 
 fn kind_of(s: String) -> RuleKind {
     RuleKind::parse(&s).unwrap_or(RuleKind::Term) // o CHECK da tabela só deixa 'term' e 'replace'
@@ -111,6 +124,23 @@ fn global_from_row(r: &Row) -> rusqlite::Result<Rule> {
         created_at: r.get(5)?,
         source_edit_id: r.get(6)?,
         source_library_id: r.get(7)?,
+        overridden: false,
+    })
+}
+
+fn company_from_row(library_id: i64, r: &Row) -> rusqlite::Result<Rule> {
+    Ok(Rule {
+        id: r.get(0)?,
+        scope: Scope::Company,
+        library_id: Some(library_id),
+        client_id: None,
+        kind: kind_of(r.get(1)?),
+        pattern: r.get(2)?,
+        replacement: r.get(3)?,
+        case_sensitive: r.get(4)?,
+        created_at: r.get(5)?,
+        source_edit_id: r.get(6)?,
+        source_library_id: None,
         overridden: false,
     })
 }
@@ -137,6 +167,11 @@ pub(crate) fn global_rules_in(conn: &Connection) -> Result<Vec<Rule>> {
     Ok(stmt.query_map([], global_from_row)?.collect::<rusqlite::Result<_>>()?)
 }
 
+pub(crate) fn company_rules_in(conn: &Connection, library_id: i64) -> Result<Vec<Rule>> {
+    let mut stmt = conn.prepare(&format!("SELECT {COMPANY_COLS} FROM glossary_library ORDER BY id"))?;
+    Ok(stmt.query_map([], |r| company_from_row(library_id, r))?.collect::<rusqlite::Result<_>>()?)
+}
+
 pub(crate) fn client_rules_in(conn: &Connection, library_id: i64, client_id: i64) -> Result<Vec<Rule>> {
     let mut stmt = conn.prepare(&format!("SELECT {CLIENT_COLS} FROM glossary_client WHERE client_id = ?1 ORDER BY id"))?;
     Ok(stmt.query_map([client_id], |r| client_from_row(library_id, r))?.collect::<rusqlite::Result<_>>()?)
@@ -145,6 +180,7 @@ pub(crate) fn client_rules_in(conn: &Connection, library_id: i64, client_id: i64
 fn owner_rules(conn: &Connection, owner: Owner) -> Result<Vec<Rule>> {
     match owner {
         Owner::Global => global_rules_in(conn),
+        Owner::Company { library_id } => company_rules_in(conn, library_id),
         Owner::Client { library_id, client_id } => client_rules_in(conn, library_id, client_id),
     }
 }
@@ -153,6 +189,9 @@ fn fetch_rule(conn: &Connection, owner: Owner, id: i64) -> Result<Rule> {
     let found = match owner {
         Owner::Global => conn
             .query_row(&format!("SELECT {GLOBAL_COLS} FROM glossary_global WHERE id = ?1"), [id], global_from_row)
+            .optional()?,
+        Owner::Company { library_id } => conn
+            .query_row(&format!("SELECT {COMPANY_COLS} FROM glossary_library WHERE id = ?1"), [id], |r| company_from_row(library_id, r))
             .optional()?,
         Owner::Client { library_id, .. } => conn
             .query_row(&format!("SELECT {CLIENT_COLS} FROM glossary_client WHERE id = ?1"), [id], |r| client_from_row(library_id, r))
@@ -178,6 +217,11 @@ fn insert_raw(conn: &Connection, owner: Owner, input: &RuleInput, source: Option
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![kind, input.pattern, input.replacement, cs, now, source.map(|s| s.edit_id), source.map(|s| s.library_id)],
         )?,
+        Owner::Company { .. } => conn.execute(
+            "INSERT INTO glossary_library (kind, pattern, replacement, case_sensitive, created_at, source_edit_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![kind, input.pattern, input.replacement, cs, now, source.map(|s| s.edit_id)],
+        )?,
         Owner::Client { client_id, .. } => conn.execute(
             "INSERT INTO glossary_client (client_id, kind, pattern, replacement, case_sensitive, created_at, source_edit_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -201,7 +245,7 @@ fn update_rule(conn: &Connection, owner: Owner, id: i64, input: &RuleInput) -> R
     if let Some(dup) = owner_rules(conn, owner)?.iter().find(|r| r.id != id && same_identity(r, input.kind, &input.pattern)) {
         return Err(conflict(dup));
     }
-    let table = if matches!(owner, Owner::Global) { "glossary_global" } else { "glossary_client" };
+    let table = owner.table();
     conn.execute(
         &format!("UPDATE {table} SET kind = ?1, pattern = ?2, replacement = ?3, case_sensitive = ?4 WHERE id = ?5"),
         params![input.kind.as_str(), input.pattern, input.replacement, input.case_sensitive, id],
@@ -211,21 +255,28 @@ fn update_rule(conn: &Connection, owner: Owner, id: i64, input: &RuleInput) -> R
 
 fn delete_rule(conn: &Connection, owner: Owner, id: i64) -> Result<Rule> {
     let rule = fetch_rule(conn, owner, id)?;
-    let table = if matches!(owner, Owner::Global) { "glossary_global" } else { "glossary_client" };
+    let table = owner.table();
     conn.execute(&format!("DELETE FROM {table} WHERE id = ?1"), [id])?;
     Ok(rule)
 }
 
 // ------------------------------------------------------------------ fusão das camadas
 
-/// Regras do cliente primeiro, depois as globais. Uma global some (`overridden`) quando o
-/// cliente tem regra do mesmo tipo e padrão (sem caixa, espaços normalizados): o cliente
-/// sobrescreve. Termos e substituições não se sobrescrevem entre si.
-pub fn merge(global: Vec<Rule>, client: Vec<Rule>) -> Vec<Rule> {
-    let keys: HashSet<(RuleKind, String)> = client.iter().map(|r| (r.kind, norm_key(&r.pattern))).collect();
+/// Regras do cliente primeiro, depois as da empresa, depois as globais. Uma regra de camada mais
+/// baixa some (`overridden`) quando uma camada mais alta tem regra do mesmo tipo e padrão (sem caixa,
+/// espaços normalizados): cliente > empresa > global. Termos e substituições não se sobrescrevem entre si.
+pub fn merge(global: Vec<Rule>, company: Vec<Rule>, client: Vec<Rule>) -> Vec<Rule> {
+    let key = |r: &Rule| (r.kind, norm_key(&r.pattern));
+    let mut above: HashSet<(RuleKind, String)> = client.iter().map(key).collect();
+    let company_keys: HashSet<(RuleKind, String)> = company.iter().map(key).collect();
     let mut out = client;
+    out.extend(company.into_iter().map(|mut r| {
+        r.overridden = above.contains(&key(&r));
+        r
+    }));
+    above.extend(company_keys);
     out.extend(global.into_iter().map(|mut r| {
-        r.overridden = keys.contains(&(r.kind, norm_key(&r.pattern)));
+        r.overridden = above.contains(&key(&r));
         r
     }));
     out
@@ -305,17 +356,21 @@ impl App {
         delete_rule(&self.db, Owner::Global, id)
     }
 
-    /// Regras visíveis num contexto: as do cliente (se a chamada tem cliente) + as globais,
-    /// estas marcadas com `overridden` quando o cliente tem a sua. Sem cliente (inbox), só as globais.
+    /// Regras visíveis num contexto: as do cliente (se a chamada tem cliente), as da empresa e as
+    /// globais, cada camada marcada com `overridden` quando uma mais alta tem a sua. Na inbox
+    /// (sem empresa e sem cliente) só valem as globais.
     pub fn merged_rules(&self, lib: &Library, client_id: Option<i64>) -> Result<Vec<Rule>> {
+        if lib.row.is_inbox() {
+            return Ok(merge(self.global_rules()?, vec![], vec![]));
+        }
         let client = match client_id {
-            Some(c) if !lib.row.is_inbox() => lib.client_rules(c)?,
-            _ => vec![],
+            Some(c) => lib.client_rules(c)?,
+            None => vec![],
         };
-        Ok(merge(self.global_rules()?, client))
+        Ok(merge(self.global_rules()?, lib.company_rules()?, client))
     }
 
-    /// `merged_rules` sem as globais escondidas.
+    /// `merged_rules` sem as regras escondidas.
     pub fn effective_rules(&self, lib: &Library, client_id: Option<i64>) -> Result<Vec<Rule>> {
         Ok(self.merged_rules(lib, client_id)?.into_iter().filter(|r| !r.overridden).collect())
     }
@@ -325,6 +380,16 @@ impl App {
     /// estão em bancos diferentes, então a global entra primeiro e é desfeita se a remoção falhar.
     pub fn promote_rule(&self, lib: &Library, rule_id: i64) -> Result<Rule> {
         let rule = lib.client_rule(rule_id)?;
+        self.promote_to_global(lib, &rule, |lib| lib.remove_client_rule(rule_id))
+    }
+
+    /// Empresa → global, com a mesma semântica de `promote_rule`.
+    pub fn promote_company_rule(&self, lib: &Library, rule_id: i64) -> Result<Rule> {
+        let rule = lib.company_rule(rule_id)?;
+        self.promote_to_global(lib, &rule, |lib| lib.remove_company_rule(rule_id))
+    }
+
+    fn promote_to_global(&self, lib: &Library, rule: &Rule, remove: impl FnOnce(&Library) -> Result<Rule>) -> Result<Rule> {
         let input = RuleInput { kind: rule.kind, pattern: rule.pattern.clone(), replacement: rule.replacement.clone(), case_sensitive: rule.case_sensitive };
         let existing = self.global_rules()?.into_iter().find(|g| same_identity(g, rule.kind, &rule.pattern));
         let (global, created) = match existing {
@@ -335,7 +400,7 @@ impl App {
                 (self.add_global_rule(&input, source)?, true)
             }
         };
-        if let Err(e) = lib.remove_client_rule(rule_id) {
+        if let Err(e) = remove(lib) {
             if created {
                 let _ = self.remove_global_rule(global.id);
             }
@@ -344,7 +409,7 @@ impl App {
         Ok(global)
     }
 
-    /// Aplica o glossário em vigor (global + cliente da chamada) a uma versão da chamada
+    /// Aplica o glossário em vigor (global + empresa + cliente da chamada) a uma versão da chamada
     /// (padrão: a ativa). Com `dry_run` só mostra as mudanças.
     pub fn apply_glossary(
         &self,
@@ -359,7 +424,7 @@ impl App {
         lib.apply_glossary_rules(&rules, call_id, transcript_id, origin, dry_run)
     }
 
-    /// Termos (`term`) em vigor para o prompt do modelo: os do cliente primeiro, sem repetir, até
+    /// Termos (`term`) em vigor para o prompt do modelo: os do cliente, depois os da empresa e os globais, sem repetir, até
     /// o orçamento de ~224 tokens (ver `glossary::estimate_tokens`).
     pub fn prompt_terms(&self, lib: &Library, client_id: Option<i64>) -> Result<Vec<String>> {
         let terms: Vec<String> = self
@@ -416,6 +481,7 @@ impl App {
                 pattern: s.pattern,
                 replacement: s.replacement,
                 client: client.clone(),
+                company: !lib.row.is_inbox(),
             })
             .collect())
     }
@@ -439,6 +505,11 @@ impl App {
         let lib;
         let (conn, owner) = match scope {
             ImportScope::Global => (&self.db, Owner::Global),
+            ImportScope::Company { library_id } => {
+                lib = self.open_library(library_id)?;
+                lib.check_has_company_layer()?;
+                (&lib.conn, Owner::Company { library_id })
+            }
             ImportScope::Client { library_id, client_id } => {
                 lib = self.open_library(library_id)?;
                 if lib.row.is_inbox() {
@@ -488,9 +559,67 @@ impl App {
     }
 }
 
-// ------------------------------------------------------------------ Library: camada do cliente
+// ------------------------------------------------------------------ Library: camadas da empresa e do cliente
 
 impl Library {
+    /// A inbox não tem camada de empresa: só as regras globais valem nela.
+    fn check_has_company_layer(&self) -> Result<()> {
+        if self.row.is_inbox() {
+            return Err(Error::invalid("unclassified calls have no company glossary"));
+        }
+        Ok(())
+    }
+
+    /// Regras da empresa/projeto desta biblioteca (só as dela, sem as globais). Vazio na inbox.
+    pub fn company_rules(&self) -> Result<Vec<Rule>> {
+        if self.row.is_inbox() {
+            return Ok(vec![]);
+        }
+        company_rules_in(&self.conn, self.id())
+    }
+
+    pub fn company_rule(&self, id: i64) -> Result<Rule> {
+        fetch_rule(&self.conn, Owner::Company { library_id: self.id() }, id)
+    }
+
+    /// `source_edit_id`: edição de origem quando a regra nasce de uma sugestão.
+    pub fn add_company_rule(&self, input: &RuleInput, source_edit_id: Option<i64>) -> Result<Rule> {
+        self.check_has_company_layer()?;
+        let owner = Owner::Company { library_id: self.id() };
+        insert_rule(&self.conn, owner, input, source_edit_id.map(|edit_id| RuleSource { library_id: self.id(), edit_id }))
+    }
+
+    pub fn update_company_rule(&self, id: i64, input: &RuleInput) -> Result<Rule> {
+        update_rule(&self.conn, Owner::Company { library_id: self.id() }, id, input)
+    }
+
+    /// Devolve a regra removida.
+    pub fn remove_company_rule(&self, id: i64) -> Result<Rule> {
+        delete_rule(&self.conn, Owner::Company { library_id: self.id() }, id)
+    }
+
+    /// Cliente → empresa: cria a regra da empresa e remove a cópia do cliente, numa transação só
+    /// (as duas pontas estão no mesmo `library.db`). Se a empresa já tem uma regra idêntica, só remove
+    /// a cópia; se tem com outra substituição, é conflito e nada muda.
+    pub fn promote_client_rule(&self, rule_id: i64) -> Result<Rule> {
+        self.check_has_company_layer()?;
+        let rule = self.client_rule(rule_id)?;
+        let owner = Owner::Company { library_id: self.id() };
+        let tx = self.conn.unchecked_transaction()?;
+        let company = match company_rules_in(&tx, self.id())?.into_iter().find(|c| same_identity(c, rule.kind, &rule.pattern)) {
+            Some(c) if c.replacement == rule.replacement && c.case_sensitive == rule.case_sensitive => c,
+            Some(c) => return Err(conflict(&c)),
+            None => {
+                let input = RuleInput { kind: rule.kind, pattern: rule.pattern.clone(), replacement: rule.replacement.clone(), case_sensitive: rule.case_sensitive };
+                let source = rule.source_edit_id.map(|edit_id| RuleSource { library_id: self.id(), edit_id });
+                insert_raw(&tx, owner, &input, source)?
+            }
+        };
+        delete_rule(&tx, Owner::Client { library_id: self.id(), client_id: 0 }, rule_id)?;
+        tx.commit()?;
+        Ok(company)
+    }
+
     /// Regras de um cliente desta biblioteca (só as dele, sem as globais).
     pub fn client_rules(&self, client_id: i64) -> Result<Vec<Rule>> {
         client_rules_in(&self.conn, self.id(), client_id)
@@ -583,6 +712,10 @@ mod tests {
         }
     }
 
+    fn view(m: &[Rule]) -> Vec<(Scope, i64, bool)> {
+        m.iter().map(|r| (r.scope, r.id, r.overridden)).collect()
+    }
+
     #[test]
     fn client_overrides_global_by_kind_and_normalized_pattern() {
         let global = vec![
@@ -591,15 +724,71 @@ mod tests {
             rule(3, Scope::Global, RuleKind::Term, "gate wei"),
         ];
         let client = vec![rule(1, Scope::Client, RuleKind::Replace, "gate wei")];
-        let m = merge(global, client);
-        let view: Vec<_> = m.iter().map(|r| (r.scope, r.id, r.overridden)).collect();
+        let m = merge(global, vec![], client);
         assert_eq!(
-            view,
+            view(&m),
             [(Scope::Client, 1, false), (Scope::Global, 1, true), (Scope::Global, 2, false), (Scope::Global, 3, false)]
         );
         let eff = replace_rules(&m);
         assert_eq!(eff.len(), 2, "a global escondida não vai para o motor");
         assert_eq!(eff[0].scope, Some(Scope::Client));
+    }
+
+    #[test]
+    fn company_overrides_global_and_client_overrides_both() {
+        let global = vec![
+            rule(1, Scope::Global, RuleKind::Replace, "Orbit"),
+            rule(2, Scope::Global, RuleKind::Replace, "Zenit"),
+            rule(3, Scope::Global, RuleKind::Term, "orbit"),
+        ];
+        let company = vec![
+            rule(1, Scope::Company, RuleKind::Replace, "orbit"),
+            rule(2, Scope::Company, RuleKind::Replace, "Acme  Corp"),
+        ];
+        // só empresa: a global do mesmo tipo e padrão some; o termo `orbit` não é coberto por um `replace`
+        let m = merge(global.clone(), company.clone(), vec![]);
+        assert_eq!(
+            view(&m),
+            [
+                (Scope::Company, 1, false),
+                (Scope::Company, 2, false),
+                (Scope::Global, 1, true),
+                (Scope::Global, 2, false),
+                (Scope::Global, 3, false)
+            ]
+        );
+        assert_eq!(replace_rules(&m).iter().map(|r| (r.scope.unwrap(), r.id.unwrap())).collect::<Vec<_>>(), [(Scope::Company, 1), (Scope::Company, 2), (Scope::Global, 2)]);
+
+        // cliente com a mesma chave: cobre a da empresa e a global
+        let client = vec![rule(7, Scope::Client, RuleKind::Replace, "ORBIT")];
+        let m = merge(global.clone(), company.clone(), client);
+        assert_eq!(
+            view(&m),
+            [
+                (Scope::Client, 7, false),
+                (Scope::Company, 1, true),
+                (Scope::Company, 2, false),
+                (Scope::Global, 1, true),
+                (Scope::Global, 2, false),
+                (Scope::Global, 3, false)
+            ]
+        );
+        assert_eq!(replace_rules(&m).len(), 3);
+
+        // cliente cobre só a global (a empresa não tem a chave): a da empresa fica
+        let m = merge(global, company, vec![rule(8, Scope::Client, RuleKind::Replace, "zenit")]);
+        assert_eq!(view(&m)[0], (Scope::Client, 8, false));
+        assert_eq!(m.iter().filter(|r| r.overridden).map(|r| (r.scope, r.id)).collect::<Vec<_>>(), [(Scope::Global, 1), (Scope::Global, 2)]);
+    }
+
+    #[test]
+    fn terms_and_replacements_never_override_each_other_across_layers() {
+        let m = merge(
+            vec![rule(1, Scope::Global, RuleKind::Term, "Zenith")],
+            vec![rule(1, Scope::Company, RuleKind::Replace, "zenith")],
+            vec![rule(1, Scope::Client, RuleKind::Replace, "ZENITH")],
+        );
+        assert_eq!(view(&m), [(Scope::Client, 1, false), (Scope::Company, 1, true), (Scope::Global, 1, false)]);
     }
 
     #[test]

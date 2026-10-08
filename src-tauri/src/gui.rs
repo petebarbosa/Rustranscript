@@ -366,6 +366,7 @@ fn import_start(
 fn parse_scope(scope: &str) -> R<Scope> {
     match scope {
         "global" => Ok(Scope::Global),
+        "company" => Ok(Scope::Company),
         "client" => Ok(Scope::Client),
         other => Err(bad(format!("unknown scope {other}"))),
     }
@@ -379,15 +380,16 @@ fn need<T>(v: Option<T>, what: &str) -> R<T> {
     v.ok_or_else(|| bad(format!("{what} is required")))
 }
 
-/// Regras em vigor. Sem `library_id` ou sem `client_id`: só as globais. Com os dois: as do
-/// cliente + as globais (estas com `overridden` quando o cliente tem a sua).
+/// Regras em vigor. Sem `library_id`: só as globais. Só com `library_id`: as da empresa + as
+/// globais. Com `library_id` e `client_id`: cliente + empresa + globais. Cada camada sai com
+/// `overridden` quando uma mais alta tem a sua.
 #[tauri::command(async)]
 fn glossary_list(state: State<AppState>, library_id: Option<i64>, client_id: Option<i64>, kind: Option<String>) -> R<Vec<Rule>> {
     let kind = kind.as_deref().map(parse_kind).transpose()?;
     with_app(&state, |app| {
-        let mut rules = match (library_id, client_id) {
-            (Some(l), Some(c)) => app.merged_rules(&app.open_library(l)?, Some(c))?,
-            _ => app.global_rules()?,
+        let mut rules = match library_id {
+            Some(l) => app.merged_rules(&app.open_library(l)?, client_id)?,
+            None => app.global_rules()?,
         };
         if let Some(k) = kind {
             rules.retain(|r| r.kind == k);
@@ -396,7 +398,7 @@ fn glossary_list(state: State<AppState>, library_id: Option<i64>, client_id: Opt
     })
 }
 
-/// `scope = "client"` exige `library_id` e `client_id`. `source_edit_id` (de uma sugestão) é
+/// `scope = "company"` exige `library_id`; `"client"`, `library_id` e `client_id`. `source_edit_id` (de uma sugestão) é
 /// guardado na regra; numa regra global, `library_id` diz de qual biblioteca é essa edição.
 #[tauri::command(async)]
 #[allow(clippy::too_many_arguments)]
@@ -418,6 +420,7 @@ fn glossary_add(
             let source = library_id.zip(source_edit_id).map(|(library_id, edit_id)| RuleSource { library_id, edit_id });
             with_app(&state, |app| app.add_global_rule(&input, source))?
         }
+        Scope::Company => with_lib(&state, need(library_id, "libraryId")?, |l| l.add_company_rule(&input, source_edit_id))?,
         Scope::Client => {
             let (library_id, client_id) = (need(library_id, "libraryId")?, need(client_id, "clientId")?);
             with_lib(&state, library_id, |l| l.add_client_rule(client_id, &input, source_edit_id))?
@@ -443,6 +446,7 @@ fn glossary_update(
     let input = RuleInput { kind: parse_kind(&kind)?, pattern, replacement, case_sensitive };
     let rule = match parse_scope(&scope)? {
         Scope::Global => with_app(&state, |app| app.update_global_rule(id, &input))?,
+        Scope::Company => with_lib(&state, need(library_id, "libraryId")?, |l| l.update_company_rule(id, &input))?,
         Scope::Client => with_lib(&state, need(library_id, "libraryId")?, |l| l.update_client_rule(id, &input))?,
     };
     changed(&handle, json!({"event": "glossary", "library_id": rule.library_id}));
@@ -454,16 +458,26 @@ fn glossary_update(
 fn glossary_remove(handle: tauri::AppHandle, state: State<AppState>, scope: String, library_id: Option<i64>, id: i64) -> R<Rule> {
     let rule = match parse_scope(&scope)? {
         Scope::Global => with_app(&state, |app| app.remove_global_rule(id))?,
+        Scope::Company => with_lib(&state, need(library_id, "libraryId")?, |l| l.remove_company_rule(id))?,
         Scope::Client => with_lib(&state, need(library_id, "libraryId")?, |l| l.remove_client_rule(id))?,
     };
     changed(&handle, json!({"event": "glossary", "library_id": rule.library_id}));
     Ok(rule)
 }
 
-/// Regra de cliente → global (a cópia do cliente some). Devolve a regra global.
+/// Sobe uma regra de camada (a cópia de baixo some). `scope` é a camada de origem (padrão: `client`) e
+/// `to` a de destino (padrão: `global`): cliente → global, cliente → empresa ou empresa → global.
+/// Devolve a regra criada (ou a idêntica que já existia).
 #[tauri::command(async)]
-fn glossary_promote(handle: tauri::AppHandle, state: State<AppState>, library_id: i64, id: i64) -> R<Rule> {
-    let rule = with_app_lib(&state, library_id, |app, l| app.promote_rule(l, id))?;
+fn glossary_promote(handle: tauri::AppHandle, state: State<AppState>, library_id: i64, id: i64, scope: Option<String>, to: Option<String>) -> R<Rule> {
+    let from = scope.as_deref().map(parse_scope).transpose()?.unwrap_or(Scope::Client);
+    let to = to.as_deref().map(parse_scope).transpose()?.unwrap_or(Scope::Global);
+    let rule = with_app_lib(&state, library_id, |app, l| match (from, to) {
+        (Scope::Client, Scope::Global) => app.promote_rule(l, id),
+        (Scope::Client, Scope::Company) => l.promote_client_rule(id),
+        (Scope::Company, Scope::Global) => app.promote_company_rule(l, id),
+        _ => Err(core_lib::Error::invalid("a rule only moves up: client -> company -> global")),
+    })?;
     changed(&handle, json!({"event": "glossary", "library_id": library_id}));
     Ok(rule)
 }
@@ -486,7 +500,7 @@ fn glossary_apply(
     Ok(report)
 }
 
-/// Importa um arquivo de termos. `scope = "client"` exige `library_id` e `client_id`.
+/// Importa um arquivo de termos. `scope = "company"` exige `library_id`; `"client"`, `library_id` e `client_id`.
 #[tauri::command(async)]
 #[allow(clippy::too_many_arguments)]
 fn glossary_import_file(
@@ -502,6 +516,7 @@ fn glossary_import_file(
     let kind = kind.as_deref().map(parse_kind).transpose()?;
     let target = match parse_scope(&scope)? {
         Scope::Global => ImportScope::Global,
+        Scope::Company => ImportScope::Company { library_id: need(library_id, "libraryId")? },
         Scope::Client => ImportScope::Client { library_id: need(library_id, "libraryId")?, client_id: need(client_id, "clientId")? },
     };
     let report = with_app(&state, |app| app.import_glossary_file(std::path::Path::new(&path), target, kind, dry_run))?;
@@ -517,7 +532,7 @@ fn glossary_suggestions(state: State<AppState>, library_id: i64, block_id: i64, 
     with_app_lib(&state, library_id, |app, l| app.block_edit_suggestions(l, block_id, &old_text, &new_text))
 }
 
-/// Termos que iriam para o prompt do modelo (cliente primeiro), dentro do orçamento de tokens.
+/// Termos que iriam para o prompt do modelo (cliente, empresa, global), dentro do orçamento de tokens.
 #[tauri::command(async)]
 fn glossary_prompt_terms(state: State<AppState>, library_id: i64, client_id: Option<i64>) -> R<Value> {
     with_app_lib(&state, library_id, |app, l| {

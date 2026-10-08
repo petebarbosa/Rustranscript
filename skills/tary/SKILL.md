@@ -40,11 +40,20 @@ Cuts remove tangents from the call without touching the FLACs: the player skips 
 
 ## Glossary
 
-A rule is `wrong -> right` (replacement) or a bare term (steers the model). Scope: `--global`, or `--library X --client Y`.
+A rule is `wrong -> right` (replacement) or a bare term (steers the model). Three layers, most specific first: **client** > **company** (the library, "company/project" in the UI) > **global**. A call uses the layers that apply to it: every call in a company gets the company's rules, with or without a client; the client's rules are added when the call has one. Unclassified calls (inbox) have no company and no client: only global applies. A rule overrides a lower one with the same kind (term or replacement) and the same pattern (case and extra spaces ignored): say global has `Orbit -> Orbix` and the company has `Orbit -> Orbital`; in that company `Orbital` wins and the global rule shows `overridden: true`, elsewhere the global one applies. A client rule with the same pattern overrides both. Terms and replacements never override each other, and there is no "turn off a global rule here". Rule ids are separate per layer.
 
-- `tary glossary list --json`
-- `tary glossary add "Gate Wei" "Gateway" --global` (omit the replacement for a term). `add` has no dry run.
-- `tary glossary apply <key> --dry-run`, then `tary glossary apply <key>` rewrites matching blocks of that call.
+Scope flags (`add`, `remove`, `import`, `promote`, `list`, `terms`):
+
+- `--global`: the global layer.
+- `--library X` alone: the company layer of library X (id or name).
+- `--library X --client Y`: the client layer.
+
+- `tary glossary list --json`: global rules only. `--library X` adds the company rules (company over global); `--library X --client Y` gives all three layers. Each rule has `scope` (`global`, `company`, `client`) and `overridden`; `--type term|replace` filters.
+- `tary glossary add "Gate Wei" "Gateway" --global` (omit the replacement for a term). Same with `--library X` (company) or `--library X --client Y`. `add` has no dry run.
+- `tary glossary remove <id>` takes the same scope flags; the id belongs to that layer. `glossary promote <id> --library X` moves a company rule up to global; with `--client Y` it moves a client rule to the company (default) or to global (`--to global`). The lower copy is removed; an identical rule above just absorbs it, a different replacement above is `conflict`.
+- `tary glossary import <file> [--dry-run]` with the same scope flags (`--type term|replace` limits the lines).
+- `tary glossary terms --library X [--client Y]` shows the prompt terms in order client, company, global (without `--library`: the inbox, global only).
+- `tary glossary apply <key> --dry-run`, then `tary glossary apply <key>` rewrites matching blocks of that call with the layers in effect for it.
 
 ## Queue and setup
 

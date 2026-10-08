@@ -16,25 +16,31 @@ const field = (label: string, input: string, hint = '') =>
 
 export async function renderGlossary(el: HTMLElement, params: URLSearchParams): Promise<View> {
   const companies = store.libraries.filter(l => l.kind === 'company' && l.available)
+  // da camada mais ampla à mais específica: global, cada empresa e, abaixo dela, os clientes
   const contexts: { value: string; label: string; ctx: Ctx }[] = [
     { value: 'global', label: t('glossary.ctx_global'), ctx: { libraryId: null, clientId: null } },
   ]
-  for (const l of companies)
+  for (const l of companies) {
+    contexts.push({ value: `${l.id}`, label: t('glossary.ctx_company', { name: libName(l) }), ctx: { libraryId: l.id, clientId: null } })
     for (const c of store.clients.get(l.id) ?? [])
       contexts.push({ value: `${l.id}:${c.id}`, label: `${libName(l)} · ${c.name}`, ctx: { libraryId: l.id, clientId: c.id } })
-  const keyOf = (c: Ctx) => (c.libraryId == null ? 'global' : `${c.libraryId}:${c.clientId}`)
+  }
+  const keyOf = (c: Ctx) => (c.libraryId == null ? 'global' : c.clientId == null ? `${c.libraryId}` : `${c.libraryId}:${c.clientId}`)
 
   let ctx = lastCtx
   if (params.get('lib') && params.get('client')) ctx = { libraryId: Number(params.get('lib')), clientId: Number(params.get('client')) }
+  else if (params.get('lib')) ctx = { libraryId: Number(params.get('lib')), clientId: null } // link do modal da chamada: as regras da empresa
   else if (params.has('global')) ctx = contexts[0].ctx // link do modal da chamada: vai direto às regras globais
   if (!contexts.some(c => c.value === keyOf(ctx))) ctx = contexts[0].ctx
   let tab: RuleKind = lastTab
   let rules: Rule[] = []
   let prompt: PromptTerms | null = null
 
-  const isClient = () => ctx.libraryId != null
+  // a camada do contexto escolhido: as regras novas nascem nela (a menos que se escolha outra mais ampla)
+  const level = (): Scope => (ctx.libraryId == null ? 'global' : ctx.clientId == null ? 'company' : 'client')
   const ctxLabel = () => contexts.find(c => c.value === keyOf(ctx))?.label ?? ''
-  // as regras de cliente ficam na biblioteca do cliente; as globais vivem no app.db (qualquer biblioteca serve para o prompt)
+  const libLabel = () => libName(store.libraries.find(l => l.id === ctx.libraryId)!)
+  // as regras de empresa e de cliente ficam na biblioteca; as globais vivem no app.db (qualquer biblioteca serve para o prompt)
   const promptLib = () => ctx.libraryId ?? store.boot.inbox_id
 
   async function load() {
@@ -44,9 +50,17 @@ export async function renderGlossary(el: HTMLElement, params: URLSearchParams): 
 
   // ------------------------------------------------------------------ tela
   function originBadge(r: Rule) {
-    return r.scope === 'client'
-      ? `<span class="shrink-0 rounded-full bg-emerald-400/10 px-2 py-0.5 text-[11px] font-medium text-emerald-300">${esc(t('glossary.origin_client'))}</span>`
-      : `<span class="shrink-0 rounded-full bg-sky-400/10 px-2 py-0.5 text-[11px] font-medium text-sky-300">${esc(t('glossary.origin_global'))}</span>`
+    const [cls, key] = r.scope === 'client' ? ['bg-emerald-400/10 text-emerald-300', 'glossary.origin_client']
+      : r.scope === 'company' ? ['bg-violet-400/10 text-violet-300', 'glossary.origin_company']
+      : ['bg-sky-400/10 text-sky-300', 'glossary.origin_global']
+    return `<span class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${cls}">${esc(t(key))}</span>`
+  }
+
+  /** Quem esconde a regra: se algum cliente tem a mesma (tipo + padrão), o cliente; senão, a empresa. */
+  function overriddenNote(r: Rule) {
+    const same = (x: Rule) => x.kind === r.kind && fold(x.pattern.replace(/\s+/g, ' ').trim()) === fold(r.pattern.replace(/\s+/g, ' ').trim())
+    const byClient = r.scope !== 'client' && rules.some(x => x.scope === 'client' && same(x))
+    return t(byClient ? 'glossary.overridden_by_client' : 'glossary.overridden_by_company')
   }
 
   function rowHtml(r: Rule) {
@@ -59,13 +73,14 @@ export async function renderGlossary(el: HTMLElement, params: URLSearchParams): 
         ${originBadge(r)}
         <div class="min-w-0 flex-1">
           <p class="break-words font-mono text-sm">${text}</p>
-          ${r.overridden ? `<p class="mt-0.5 text-xs text-amber-300/80">${esc(t('glossary.overridden'))}</p>` : ''}
+          ${r.overridden ? `<p class="mt-0.5 text-xs text-amber-300/80">${esc(overriddenNote(r))}</p>` : ''}
         </div>
         ${caseBadge(r)}
       </div>
       <div class="flex shrink-0 items-center">
         <button type="button" data-edit class="${act}">${esc(t('common.edit'))}</button>
-        ${r.scope === 'client' ? `<button type="button" data-promote title="${esc(t('glossary.promote_hint'))}" class="${act}">${esc(t('glossary.promote'))}</button>` : ''}
+        ${r.scope === 'client' ? `<button type="button" data-promote="company" title="${esc(t('glossary.promote_company_hint'))}" class="${act}">${esc(t('glossary.promote_company'))}</button>` : ''}
+        ${r.scope !== 'global' ? `<button type="button" data-promote="global" title="${esc(t('glossary.promote_hint'))}" class="${act}">${esc(t('glossary.promote'))}</button>` : ''}
         <button type="button" data-remove class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-rose-400/10 hover:text-rose-200">${esc(t('common.remove'))}</button>
       </div></li>`
   }
@@ -102,7 +117,7 @@ export async function renderGlossary(el: HTMLElement, params: URLSearchParams): 
         <button id="import" type="button" class="${btnCls.btn}">${esc(t('glossary.import'))}</button>
         <button id="add" type="button" class="${btnCls.btnPrimary}">+ ${esc(t(tab === 'replace' ? 'glossary.add_replace' : 'glossary.add_term'))}</button>
       </div>
-      <p class="mt-2 text-xs text-zinc-600">${esc(t(isClient() ? 'glossary.ctx_client_hint' : 'glossary.ctx_global_hint'))}</p>
+      <p class="mt-2 text-xs text-zinc-600">${esc(t(`glossary.ctx_${level()}_hint`))}</p>
 
       <div role="tablist" class="mt-6 flex gap-1 border-b border-white/10 pb-2">
         ${tabBtn('replace', t('glossary.tab_replace'))}${tabBtn('term', t('glossary.tab_term'))}
@@ -121,18 +136,25 @@ export async function renderGlossary(el: HTMLElement, params: URLSearchParams): 
   async function reload() { await load(); draw() }
 
   // ------------------------------------------------------------------ ações
+  /** "Salvar em": as camadas do contexto e as mais amplas (global > empresa > cliente), a do contexto já marcada. */
+  function scopeField() {
+    const here = level()
+    if (here === 'global') return ''
+    const opt = (v: Scope, label: string) => `<option value="${v}" ${v === here ? 'selected' : ''}>${esc(label)}</option>`
+    return field(t('glossary.f_scope'), `<select name="scope" class="${inputCls}">
+      ${opt('global', t('glossary.scope_global'))}
+      ${opt('company', t('glossary.scope_company', { name: libLabel() }))}
+      ${here === 'client' ? opt('client', t('glossary.scope_client', { name: ctxLabel() })) : ''}</select>`)
+  }
+  /** Quem a camada escolhida precisa: global, nada; empresa, a biblioteca; cliente, a biblioteca e o cliente. */
+  const scopeArgs = (scope: Scope) => ({ scope, libraryId: scope === 'global' ? null : ctx.libraryId, clientId: scope === 'client' ? ctx.clientId : null })
+
   async function addRule() {
-    const own = isClient()
-    const scopeField = own
-      ? field(t('glossary.f_scope'), `<select name="scope" class="${inputCls}">
-          <option value="client">${esc(t('glossary.scope_client', { name: ctxLabel() }))}</option>
-          <option value="global">${esc(t('glossary.scope_global'))}</option></select>`)
-      : ''
-    const r = await form(t('glossary.add_title'), scopeField + ruleFields({}, tab), t('common.add'), async f => {
+    const r = await form(t('glossary.add_title'), scopeField() + ruleFields({}, tab), t('common.add'), async f => {
       const input = readRule(f)
       const scope = ((f.elements.namedItem('scope') as HTMLSelectElement | null)?.value ?? 'global') as Scope
       try {
-        return await api.glossaryAdd({ ...input, scope, libraryId: scope === 'client' ? ctx.libraryId : null, clientId: scope === 'client' ? ctx.clientId : null })
+        return await api.glossaryAdd({ ...input, ...scopeArgs(scope) })
       } catch (e) { throw { code: 'ui', detail: describeGlossaryError(e) } }
     }, syncKind)
     if (!r) return
@@ -160,10 +182,14 @@ export async function renderGlossary(el: HTMLElement, params: URLSearchParams): 
     catch (e) { toast(describeGlossaryError(e), 'err') }
   }
 
-  async function promoteRule(r: Rule) {
-    if (!(await confirmDialog(t('glossary.promote_title'), t('glossary.promote_confirm', { pattern: r.pattern }), t('glossary.promote')))) return
-    try { await api.glossaryPromote(r.library_id!, r.id); toast(t('glossary.promoted')); await reload() }
-    catch (e) { toast(describeGlossaryError(e, 'promote'), 'err') }
+  /** Sobe a regra uma camada (cliente → empresa ou global; empresa → global); a cópia de baixo é removida. */
+  async function promoteRule(r: Rule, to: 'company' | 'global') {
+    const [title, confirm, ok, done] = to === 'company'
+      ? ['glossary.promote_company_title', 'glossary.promote_company_confirm', 'glossary.promote_company', 'glossary.promoted_company']
+      : ['glossary.promote_title', r.scope === 'company' ? 'glossary.promote_confirm_company' : 'glossary.promote_confirm', 'glossary.promote', 'glossary.promoted']
+    if (!(await confirmDialog(t(title), t(confirm, { pattern: r.pattern }), t(ok)))) return
+    try { await api.glossaryPromote(r.library_id!, r.id, r.scope, to); toast(t(done)); await reload() }
+    catch (e) { toast(describeGlossaryError(e, to === 'company' ? 'promote_company' : 'promote'), 'err') }
   }
 
   // importar lista: escolhe o arquivo → simulação (o que entra e o que fica de fora) → confirma
@@ -184,11 +210,7 @@ export async function renderGlossary(el: HTMLElement, params: URLSearchParams): 
   }
 
   async function importList() {
-    const target = isClient()
-      ? field(t('glossary.f_scope'), `<select name="scope" class="${inputCls}">
-          <option value="client">${esc(t('glossary.scope_client', { name: ctxLabel() }))}</option>
-          <option value="global">${esc(t('glossary.scope_global'))}</option></select>`)
-      : ''
+    const target = scopeField()
     const first = await form(t('glossary.import_title'),
       field(t('glossary.imp_file'), `<div class="flex gap-2"><input name="path" required class="${inputCls}" placeholder="/home/…/vocabulary.txt"><button type="button" data-pick class="${btnCls.btn} shrink-0">${esc(t('common.choose'))}</button></div>`, t('glossary.imp_format')) +
       target +
@@ -201,11 +223,9 @@ export async function renderGlossary(el: HTMLElement, params: URLSearchParams): 
         const d = new FormData(f)
         const args = {
           path: String(d.get('path')).trim(),
-          scope: (String(d.get('scope') ?? 'global') || 'global') as Scope,
-          libraryId: ctx.libraryId, clientId: ctx.clientId,
+          ...scopeArgs((String(d.get('scope') ?? 'global') || 'global') as Scope),
           kind: (String(d.get('kind') ?? '') || null) as RuleKind | null,
         }
-        if (args.scope === 'global') { args.libraryId = null; args.clientId = null }
         try { return { args, rep: await api.glossaryImportFile({ ...args, dryRun: true }) } }
         catch (e) { throw { code: 'ui', detail: describeGlossaryError(e, 'import') } }
       },
@@ -245,7 +265,7 @@ export async function renderGlossary(el: HTMLElement, params: URLSearchParams): 
       const r = rowRule(li)
       if (btn.hasAttribute('data-edit')) editRule(r)
       else if (btn.hasAttribute('data-remove')) removeRule(r)
-      else if (btn.hasAttribute('data-promote')) promoteRule(r)
+      else if (btn.hasAttribute('data-promote')) promoteRule(r, btn.dataset.promote as 'company' | 'global')
     })
   }
 

@@ -291,13 +291,18 @@ fn import_call(lib: &mut Library, cand: &Candidate, existing: Option<i64>, opts:
     };
     item.call_id = Some(call_id);
 
-    // regras `replace` em vigor (globais + cliente da chamada), aplicadas a cada versão nova
+    // regras `replace` em vigor (globais + empresa + cliente da chamada), aplicadas a cada versão nova
     let call_client: Option<i64> = tx.query_row("SELECT client_id FROM calls WHERE id = ?1", [call_id], |r| r.get(0))?;
-    let client_rules = match call_client {
-        Some(c) if !lib_is_inbox => rules::client_rules_in(&tx, lib_id, c)?,
-        _ => vec![],
+    let (company_rules, client_rules) = if lib_is_inbox {
+        (vec![], vec![])
+    } else {
+        let client = match call_client {
+            Some(c) => rules::client_rules_in(&tx, lib_id, c)?,
+            None => vec![],
+        };
+        (rules::company_rules_in(&tx, lib_id)?, client)
     };
-    let engine = Engine::new(&rules::replace_rules(&rules::merge(global_rules.to_vec(), client_rules)))?;
+    let engine = Engine::new(&rules::replace_rules(&rules::merge(global_rules.to_vec(), company_rules, client_rules)))?;
 
     for (ver, src, segs) in &parsed {
         let known: Option<i64> = tx

@@ -385,7 +385,8 @@ pub fn delete_library(app: &App, library_id: i64, mode: Option<DeleteMode>, dry_
         st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
     };
     let clients = lib.clients()?;
-    let glossary_entries: i64 = lib.conn.query_row("SELECT count(*) FROM glossary_client", [], |r| r.get(0))?;
+    let glossary_entries: i64 =
+        lib.conn.query_row("SELECT (SELECT count(*) FROM glossary_client) + (SELECT count(*) FROM glossary_library)", [], |r| r.get(0))?;
     check_not_recording(app, library_id, None)?;
     let plan = plan(app, &lib, &call_ids, Some(&inbox))?;
     let mut out = Deletion {

@@ -130,7 +130,7 @@ enum Cmd {
         #[command(subcommand)]
         what: ClientCmd,
     },
-    /// Glossário: termos (prompt do modelo) e substituições "errado → certo", globais ou por cliente
+    /// Glossário: termos (prompt do modelo) e substituições "errado → certo", em três camadas: global, da empresa/projeto e do cliente (cliente > empresa > global)
     Glossary {
         #[command(subcommand)]
         what: GlossaryCmd,
@@ -378,9 +378,10 @@ enum CutCmd {
 
 #[derive(Subcommand)]
 enum GlossaryCmd {
-    /// Lista as regras: sem --library, as globais; com --library e --client, as em vigor para o
-    /// cliente (cliente sobrescreve global; as escondidas vêm com overridden=true); só com
-    /// --library, as globais mais as de todos os clientes dela
+    /// Lista as regras, cada uma com scope (global, company, client) e overridden: sem --library, as
+    /// globais; só com --library, as em vigor na empresa/projeto (empresa sobrescreve global); com
+    /// --library e --client, as em vigor para o cliente (cliente > empresa > global). As escondidas
+    /// vêm com overridden=true
     List {
         #[arg(long)]
         library: Option<String>,
@@ -397,9 +398,10 @@ enum GlossaryCmd {
         /// Texto que entra no lugar
         #[arg(conflicts_with = "term")]
         replacement: Option<String>,
-        /// Empresa/projeto do cliente (id ou nome)
-        #[arg(long, requires = "client", conflicts_with = "global")]
+        /// Empresa/projeto (id ou nome): sozinho, a regra é da empresa (vale para todas as chamadas dela)
+        #[arg(long, conflicts_with = "global")]
         library: Option<String>,
+        /// Cliente (id, nome ou slug), dentro de --library: a regra é do cliente
         #[arg(long, requires = "library", conflicts_with = "global")]
         client: Option<String>,
         /// Regra global (vale para todas as chamadas)
@@ -412,19 +414,28 @@ enum GlossaryCmd {
         #[arg(long)]
         term: bool,
     },
-    /// Remove uma regra pelo id (ids globais e de cliente são independentes)
+    /// Remove uma regra pelo id (os ids de cada camada são independentes): --global, --library
+    /// (empresa) ou --library com --client
     Remove {
         id: i64,
         #[arg(long, conflicts_with = "global")]
         library: Option<String>,
+        #[arg(long, requires = "library", conflicts_with = "global")]
+        client: Option<String>,
         #[arg(long)]
         global: bool,
     },
-    /// Promove uma regra de cliente a global (a cópia do cliente é removida)
+    /// Sobe uma regra de camada e remove a cópia de baixo: do cliente (--library e --client) para a
+    /// empresa ou a global; da empresa (só --library) para a global
     Promote {
         id: i64,
         #[arg(long)]
         library: String,
+        #[arg(long)]
+        client: Option<String>,
+        /// Camada de destino (padrão: a de cima da regra: da do cliente, a empresa; da empresa, a global)
+        #[arg(long, value_parser = ["company", "global"])]
+        to: Option<String>,
     },
     /// Aplica o glossário em vigor a uma chamada; tudo vira um lote só, desfeito por `undo`
     Apply {
@@ -436,10 +447,11 @@ enum GlossaryCmd {
         dry_run: bool,
     },
     /// Importa um arquivo de texto UTF-8: uma entrada por linha, `#` comenta, `errado -> certo`
-    /// (ou → ou =>) vira substituição e o resto vira termo
+    /// (ou → ou =>) vira substituição e o resto vira termo. Vai para --global, --library (empresa)
+    /// ou --library com --client
     Import {
         file: PathBuf,
-        #[arg(long, requires = "client", conflicts_with = "global")]
+        #[arg(long, conflicts_with = "global")]
         library: Option<String>,
         #[arg(long, requires = "library", conflicts_with = "global")]
         client: Option<String>,
@@ -453,7 +465,8 @@ enum GlossaryCmd {
     },
     /// Mostra as regras que seriam sugeridas por uma edição <antes> → <depois> (depuração)
     Suggest { old: String, new: String },
-    /// Termos que iriam para o prompt do modelo, dentro do orçamento de tokens
+    /// Termos que iriam para o prompt do modelo, dentro do orçamento de tokens (sem --library, os da
+    /// inbox: só os globais; só com --library, os da empresa/projeto; com --client, os do cliente)
     Terms {
         #[arg(long)]
         library: Option<String>,
@@ -1297,21 +1310,31 @@ fn deletion_output(lang: Lang, r: removal::Deletion) -> core_lib::Result<Output>
     }
 }
 
-/// Escopo de uma regra na linha de comando: `--global` ou `--library` + `--client`.
+/// Escopo de uma regra na linha de comando: `--global`, `--library` (a empresa/projeto) ou `--library` + `--client`.
 enum Target {
     Global,
+    Company(Box<Library>),
     Client(Box<Library>, ClientInfo),
 }
 
 fn target(app: &App, library: &Option<String>, client: &Option<String>, global: bool) -> core_lib::Result<Target> {
     match (global, library, client) {
         (true, None, None) => Ok(Target::Global),
+        (false, Some(l), None) => Ok(Target::Company(Box::new(app.open_library(app.find_library(l)?.id)?))),
         (false, Some(l), Some(c)) => {
             let lib = app.open_library(app.find_library(l)?.id)?;
             let client = lib.find_client(c)?;
             Ok(Target::Client(Box::new(lib), client))
         }
-        _ => Err(Error::invalid("give --global, or --library together with --client")),
+        _ => Err(Error::invalid("give --global, --library (the company's rules), or --library together with --client")),
+    }
+}
+
+/// `--client` com o id de uma regra de outro cliente (ou de nenhum): `not_found`, nada é tocado.
+fn check_client_rule(lib: &Library, id: i64, client: &ClientInfo) -> core_lib::Result<()> {
+    match lib.client_rule(id)?.client_id {
+        Some(c) if c == client.id => Ok(()),
+        _ => Err(Error::not_found(format!("rule {id} of client {}", client.name))),
     }
 }
 
@@ -1324,20 +1347,12 @@ fn exec_glossary(app: &App, cmd: GlossaryCmd, lang: Lang) -> core_lib::Result<Ou
     let kind_of = |k: &Option<String>| k.as_deref().and_then(RuleKind::parse);
     match cmd {
         GlossaryCmd::List { library, client, kind } => {
-            let mut rules: Vec<Rule> = match (&library, &client) {
-                (None, _) => app.global_rules()?,
-                (Some(l), Some(c)) => {
+            let mut rules: Vec<Rule> = match &library {
+                None => app.global_rules()?,
+                Some(l) => {
                     let lib = app.open_library(app.find_library(l)?.id)?;
-                    app.merged_rules(&lib, Some(lib.find_client(c)?.id))?
-                }
-                (Some(l), None) => {
-                    let lib = app.open_library(app.find_library(l)?.id)?;
-                    let mut all = Vec::new();
-                    for c in lib.clients()? {
-                        all.extend(lib.client_rules(c.id)?);
-                    }
-                    all.extend(app.global_rules()?);
-                    all
+                    let client_id = client.as_deref().map(|c| lib.find_client(c)).transpose()?.map(|c| c.id);
+                    app.merged_rules(&lib, client_id)?
                 }
             };
             if let Some(k) = kind_of(&kind) {
@@ -1350,20 +1365,36 @@ fn exec_glossary(app: &App, cmd: GlossaryCmd, lang: Lang) -> core_lib::Result<Ou
             let input = RuleInput { kind, pattern, replacement, case_sensitive };
             match target(app, &library, &client, global)? {
                 Target::Global => json_out(to_json(app.add_global_rule(&input, None)?)?, rule_changed(None)),
+                Target::Company(lib) => json_out(to_json(lib.add_company_rule(&input, None)?)?, rule_changed(Some(lib.id()))),
                 Target::Client(lib, c) => json_out(to_json(lib.add_client_rule(c.id, &input, None)?)?, rule_changed(Some(lib.id()))),
             }
         }
-        GlossaryCmd::Remove { id, library, global } => match (global, library) {
-            (true, None) => json_out(json!({"removed": to_json(app.remove_global_rule(id)?)?}), rule_changed(None)),
-            (false, Some(l)) => {
-                let lib = app.open_library(app.find_library(&l)?.id)?;
-                json_out(json!({"removed": to_json(lib.remove_client_rule(id)?)?}), rule_changed(Some(lib.id())))
-            }
-            _ => Err(Error::invalid("give --global or --library")),
-        },
-        GlossaryCmd::Promote { id, library } => {
+        GlossaryCmd::Remove { id, library, client, global } => {
+            let removed = match target(app, &library, &client, global)? {
+                Target::Global => app.remove_global_rule(id)?,
+                Target::Company(lib) => lib.remove_company_rule(id)?,
+                Target::Client(lib, c) => {
+                    check_client_rule(&lib, id, &c)?;
+                    lib.remove_client_rule(id)?
+                }
+            };
+            let library_id = removed.library_id;
+            json_out(json!({"removed": to_json(removed)?}), rule_changed(library_id))
+        }
+        GlossaryCmd::Promote { id, library, client, to } => {
             let lib = app.open_library(app.find_library(&library)?.id)?;
-            json_out(to_json(app.promote_rule(&lib, id)?)?, rule_changed(Some(lib.id())))
+            let to_global = to.as_deref() == Some("global");
+            let promoted = match &client {
+                Some(c) => {
+                    check_client_rule(&lib, id, &lib.find_client(c)?)?;
+                    if to_global { app.promote_rule(&lib, id)? } else { lib.promote_client_rule(id)? }
+                }
+                None if to.as_deref() == Some("company") => {
+                    return Err(Error::invalid("a company rule already is in the company layer: use --to global, or give --client to promote a client rule"));
+                }
+                None => app.promote_company_rule(&lib, id)?,
+            };
+            json_out(to_json(promoted)?, rule_changed(Some(lib.id())))
         }
         GlossaryCmd::Apply { call, version, dry_run } => {
             let (mut lib, id) = find_call(app, &call)?;
@@ -1390,9 +1421,13 @@ fn exec_glossary(app: &App, cmd: GlossaryCmd, lang: Lang) -> core_lib::Result<Ou
         GlossaryCmd::Import { file, library, client, global, kind, dry_run } => {
             let scope = match target(app, &library, &client, global)? {
                 Target::Global => ImportScope::Global,
+                Target::Company(lib) => ImportScope::Company { library_id: lib.id() },
                 Target::Client(lib, c) => ImportScope::Client { library_id: lib.id(), client_id: c.id },
             };
-            let library_id = if let ImportScope::Client { library_id, .. } = scope { Some(library_id) } else { None };
+            let library_id = match scope {
+                ImportScope::Global => None,
+                ImportScope::Company { library_id } | ImportScope::Client { library_id, .. } => Some(library_id),
+            };
             let report = app.import_glossary_file(&file, scope, kind_of(&kind), dry_run)?;
             let mut v = to_json(&report)?;
             if dry_run {
@@ -1408,12 +1443,13 @@ fn exec_glossary(app: &App, cmd: GlossaryCmd, lang: Lang) -> core_lib::Result<Ou
             json_out(json!({"suggestions": found}), None)
         }
         GlossaryCmd::Terms { library, client } => {
-            let terms = match (&library, &client) {
-                (Some(l), Some(c)) => {
+            let terms = match &library {
+                Some(l) => {
                     let lib = app.open_library(app.find_library(l)?.id)?;
-                    app.prompt_terms(&lib, Some(lib.find_client(c)?.id))?
+                    let client_id = client.as_deref().map(|c| lib.find_client(c)).transpose()?.map(|c| c.id);
+                    app.prompt_terms(&lib, client_id)?
                 }
-                _ => {
+                None => {
                     let inbox = app.open_library(app.inbox_id()?)?;
                     app.prompt_terms(&inbox, None)?
                 }
@@ -2114,10 +2150,12 @@ mod tests {
         let (v, _) = run(&app, &["glossary", "list", "--library", "Empresa", "--client", "Cliente"]).unwrap();
         let view: Vec<_> = v.as_array().unwrap().iter().map(|r| (r["scope"].as_str().unwrap(), r["overridden"].as_bool().unwrap())).collect();
         assert_eq!(view, [("client", false), ("global", true)]);
+        // só --library: a visão da empresa (aqui sem regras próprias, então só a global)
         let (v, _) = run(&app, &["glossary", "list", "--library", "Empresa"]).unwrap();
-        assert_eq!(v.as_array().unwrap().len(), 2);
+        assert_eq!(v.as_array().unwrap().len(), 1);
+        assert_eq!(v[0]["scope"], "global");
 
-        let (v, _) = run(&app, &["glossary", "promote", "1", "--library", "Empresa"]).unwrap_or_else(|e| (json!({"err": e.code()}), None));
+        let (v, _) = run(&app, &["glossary", "promote", "1", "--library", "Empresa", "--client", "Cliente", "--to", "global"]).unwrap_or_else(|e| (json!({"err": e.code()}), None));
         assert_eq!(v["err"], "conflict", "global com outra substituição");
 
         let file = tmp.path().join("termos.txt");
@@ -2128,8 +2166,106 @@ mod tests {
         let (v, notify) = run(&app, &["glossary", "import", file.to_str().unwrap(), "--library", "Empresa", "--client", "Cliente"]).unwrap();
         assert_eq!(v["added"], 2);
         assert!(notify.is_some());
-        let (v, _) = run(&app, &["glossary", "remove", "1", "--library", "Empresa"]).unwrap();
+        let (v, _) = run(&app, &["glossary", "remove", "1", "--library", "Empresa", "--client", "Cliente"]).unwrap();
         assert_eq!(v["removed"]["scope"], "client");
+    }
+
+    /// `--library` sem `--client` é a camada da empresa, em todos os subcomandos que têm escopo.
+    #[test]
+    fn glossary_company_layer_scope_resolution() {
+        let (tmp, app) = setup();
+        let company = tmp.path().join("Empresa");
+        run(&app, &["library", "add", "Empresa", company.to_str().unwrap()]).unwrap();
+        run(&app, &["library", "add", "Outra", tmp.path().join("Outra").to_str().unwrap()]).unwrap();
+        run(&app, &["client", "add", "--library", "Empresa", "Cliente"]).unwrap();
+        let scopes = |v: &Value| -> Vec<(String, bool)> { v.as_array().unwrap().iter().map(|r| (r["scope"].as_str().unwrap().to_string(), r["overridden"].as_bool().unwrap())).collect() };
+        let pair = |s: &str, o: bool| (s.to_string(), o);
+
+        // add: --global, --library (empresa) e --library + --client; sem escopo (ou com o escopo pela metade) é erro
+        run(&app, &["glossary", "add", "orbit", "Orbix", "--global"]).unwrap();
+        let (v, notify) = run(&app, &["glossary", "add", "Orbit", "Orbital", "--library", "Empresa"]).unwrap();
+        assert_eq!((v["scope"].as_str(), v["library_id"].as_i64(), v["client_id"].is_null()), (Some("company"), Some(2), true));
+        assert_eq!(notify.unwrap()["library_id"], 2);
+        assert!(run(&app, &["glossary", "add", "x"]).is_err_and(|e| e.code() == "invalid"));
+        assert!(run(&app, &["glossary", "add", "Orbit", "Outro", "--library", "Empresa"]).is_err_and(|e| e.code() == "conflict"));
+        assert!(Cli::try_parse_from(["tary", "glossary", "add", "x", "--client", "Cliente"]).is_err(), "--client sozinho não resolve");
+        assert!(Cli::try_parse_from(["tary", "glossary", "add", "x", "--global", "--library", "Empresa"]).is_err());
+
+        // list: a global sozinha; a empresa (com a global escondida); o cliente (as três camadas)
+        let (v, _) = run(&app, &["glossary", "list"]).unwrap();
+        assert_eq!(scopes(&v), [pair("global", false)]);
+        let (v, _) = run(&app, &["glossary", "list", "--library", "Empresa"]).unwrap();
+        assert_eq!(scopes(&v), [pair("company", false), pair("global", true)]);
+        let (v, _) = run(&app, &["glossary", "list", "--library", "Outra"]).unwrap();
+        assert_eq!(scopes(&v), [pair("global", false)], "outra empresa: só a global");
+        run(&app, &["glossary", "add", "ORBIT", "Cliente-X", "--library", "Empresa", "--client", "Cliente"]).unwrap();
+        let (v, _) = run(&app, &["glossary", "list", "--library", "Empresa", "--client", "Cliente"]).unwrap();
+        assert_eq!(scopes(&v), [pair("client", false), pair("company", true), pair("global", true)]);
+        let (v, _) = run(&app, &["glossary", "list", "--library", "Empresa", "--type", "term"]).unwrap();
+        assert!(v.as_array().unwrap().is_empty());
+
+        // terms: sem --library, a inbox (só as globais); só com --library, a empresa; com --client, o cliente
+        run(&app, &["glossary", "add", "Kubernetes", "--global"]).unwrap();
+        run(&app, &["glossary", "add", "Zenith Service", "--library", "Empresa"]).unwrap();
+        run(&app, &["glossary", "add", "Kafka", "--library", "Empresa", "--client", "Cliente"]).unwrap();
+        let terms = |args: &[&str]| run(&app, args).unwrap().0["terms"].as_array().unwrap().iter().map(|t| t.as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(terms(&["glossary", "terms"]), ["Kubernetes"]);
+        assert_eq!(terms(&["glossary", "terms", "--library", "Empresa"]), ["Zenith Service", "Kubernetes"]);
+        assert_eq!(terms(&["glossary", "terms", "--library", "Empresa", "--client", "Cliente"]), ["Kafka", "Zenith Service", "Kubernetes"]);
+
+        // import: para a empresa
+        let file = tmp.path().join("termos.txt");
+        std::fs::write(&file, "# x
+Acme Corp
+foo -> bar
+").unwrap();
+        let (v, notify) = run(&app, &["glossary", "import", file.to_str().unwrap(), "--library", "Empresa", "--dry-run"]).unwrap();
+        assert!(notify.is_none());
+        assert_eq!((v["added"].as_u64(), v["dry_run"].as_bool()), (Some(2), Some(true)));
+        let (v, notify) = run(&app, &["glossary", "import", file.to_str().unwrap(), "--library", "Empresa"]).unwrap();
+        assert_eq!((v["added"].as_u64(), notify.unwrap()["library_id"].as_i64()), (Some(2), Some(2)));
+        let (v, _) = run(&app, &["glossary", "list", "--library", "Empresa", "--type", "term"]).unwrap();
+        assert_eq!(v.as_array().unwrap().iter().filter(|r| r["scope"] == "company").count(), 2);
+        assert!(run(&app, &["glossary", "import", file.to_str().unwrap()]).is_err_and(|e| e.code() == "invalid"));
+
+        // remove: o id da empresa não é o do cliente; o cliente certo é conferido
+        assert!(run(&app, &["glossary", "remove", "1"]).is_err());
+        let (v, _) = run(&app, &["glossary", "remove", "2", "--library", "Empresa"]).unwrap();
+        assert_eq!((v["removed"]["scope"].as_str(), v["removed"]["pattern"].as_str()), (Some("company"), Some("Zenith Service")));
+        assert!(run(&app, &["glossary", "remove", "2", "--library", "Empresa"]).is_err_and(|e| e.code() == "not_found"));
+        run(&app, &["client", "add", "--library", "Empresa", "Outro cliente"]).unwrap();
+        assert!(run(&app, &["glossary", "remove", "1", "--library", "Empresa", "--client", "Outro cliente"]).is_err_and(|e| e.code() == "not_found"), "regra de outro cliente");
+        let (v, _) = run(&app, &["glossary", "remove", "1", "--library", "Empresa", "--client", "Cliente"]).unwrap();
+        assert_eq!(v["removed"]["scope"], "client");
+    }
+
+    #[test]
+    fn glossary_promote_through_the_layers() {
+        let (tmp, app) = setup();
+        run(&app, &["library", "add", "Empresa", tmp.path().join("Empresa").to_str().unwrap()]).unwrap();
+        run(&app, &["client", "add", "--library", "Empresa", "Cliente"]).unwrap();
+        let scope_of = |args: &[&str]| run(&app, args).map(|(v, _)| v["scope"].as_str().unwrap().to_string());
+
+        // cliente → empresa (o padrão com --client): a cópia do cliente some
+        run(&app, &["glossary", "add", "zenit", "Zenith", "--library", "Empresa", "--client", "Cliente"]).unwrap();
+        assert_eq!(scope_of(&["glossary", "promote", "1", "--library", "Empresa", "--client", "Cliente"]).unwrap(), "company");
+        assert!(run(&app, &["glossary", "list", "--library", "Empresa", "--client", "Cliente"]).unwrap().0.as_array().unwrap().iter().all(|r| r["scope"] != "client"));
+        // conflito cliente → empresa: outra substituição na empresa
+        run(&app, &["glossary", "add", "zenit", "Outro", "--library", "Empresa", "--client", "Cliente"]).unwrap();
+        assert!(run(&app, &["glossary", "promote", "1", "--library", "Empresa", "--client", "Cliente"]).is_err_and(|e| e.code() == "conflict"));
+        // cliente → global (explícito): o caminho antigo; empresa → global: sem --client
+        // (cada camada tem seus ids: a regra em conflito acima é a 1 do cliente; esta é a 2)
+        run(&app, &["glossary", "add", "Kafka", "--library", "Empresa", "--client", "Cliente"]).unwrap();
+        assert_eq!(scope_of(&["glossary", "promote", "2", "--library", "Empresa", "--client", "Cliente", "--to", "global"]).unwrap(), "global");
+        assert_eq!(scope_of(&["glossary", "promote", "1", "--library", "Empresa"]).unwrap(), "global");
+        // conflito empresa → global: outra substituição na global
+        run(&app, &["glossary", "add", "zenit", "Terceiro", "--library", "Empresa"]).unwrap();
+        assert!(run(&app, &["glossary", "promote", "1", "--library", "Empresa"]).is_err_and(|e| e.code() == "conflict"));
+        // regra da empresa não sobe "para a empresa"; regra de outro cliente não é promovida
+        assert!(run(&app, &["glossary", "promote", "1", "--library", "Empresa", "--to", "company"]).is_err_and(|e| e.code() == "invalid"));
+        run(&app, &["client", "add", "--library", "Empresa", "Outro"]).unwrap();
+        assert!(run(&app, &["glossary", "promote", "1", "--library", "Empresa", "--client", "Outro"]).is_err_and(|e| e.code() == "not_found"));
+        assert!(Cli::try_parse_from(["tary", "glossary", "promote", "1", "--library", "Empresa", "--to", "client"]).is_err());
     }
     #[test]
     fn delete_commands_parse() {

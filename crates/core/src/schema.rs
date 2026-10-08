@@ -356,4 +356,18 @@ DROP TABLE edit_history;
 ALTER TABLE edit_history_new RENAME TO edit_history;
 CREATE INDEX edit_history_call ON edit_history(call_id, id);
 CREATE INDEX edit_history_batch ON edit_history(batch_id) WHERE batch_id IS NOT NULL;
+"#,
+// 7: glossário da empresa/projeto, a camada do meio (cliente > empresa > global). Mesmas colunas de
+// `glossary_client` sem `client_id`: vale para toda chamada da biblioteca, com ou sem cliente. Bibliotecas
+// já existentes ganham a tabela vazia ao abrir; a inbox também a tem, mas nunca a consulta.
+r#"
+CREATE TABLE glossary_library (
+    id              INTEGER PRIMARY KEY,
+    kind            TEXT NOT NULL CHECK (kind IN ('term', 'replace')),
+    pattern         TEXT NOT NULL,
+    replacement     TEXT,
+    case_sensitive  INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    source_edit_id  INTEGER
+);
 "#];

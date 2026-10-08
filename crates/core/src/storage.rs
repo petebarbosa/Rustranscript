@@ -70,7 +70,7 @@ pub struct AudioEntry {
 }
 
 /// Pasta da chamada, validada: relativa, dentro da biblioteca e nunca a própria raiz.
-fn call_dir(lib: &Library, dir: Option<&str>) -> Result<Option<PathBuf>> {
+pub(crate) fn call_dir(lib: &Library, dir: Option<&str>) -> Result<Option<PathBuf>> {
     let Some(dir) = dir.filter(|d| !d.is_empty()) else { return Ok(None) };
     let rel = Path::new(dir);
     if rel.is_absolute() || rel.components().any(|c| !matches!(c, Component::Normal(_))) {
@@ -81,7 +81,7 @@ fn call_dir(lib: &Library, dir: Option<&str>) -> Result<Option<PathBuf>> {
 
 /// Arquivos da chamada que a exclusão leva, com tamanho. Só arquivos comuns (links simbólicos e
 /// subpastas ficam onde estão).
-fn removable(dir: &Path) -> Result<Vec<AudioFile>> {
+pub(crate) fn removable(dir: &Path) -> Result<Vec<AudioFile>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),

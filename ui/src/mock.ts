@@ -3,7 +3,7 @@
 import { mockIPC } from '@tauri-apps/api/mocks'
 import { emit } from '@tauri-apps/api/event'
 import { TRANSCRIPTION_DEFAULTS } from './api'
-import type { ApplyReport, AudioDeletion, AudioEntry, BleedRemoval, BlockedBy, AudioCut, BlockChange, BlockInfo, BlocksChange, CutsChange, BlockSuggestion, CallDetail, ClientInfo, DeviceInfo, GlossaryImportEntry, HistoryEntry, Hit, JobInfo, JobKind, JobOptions, JobProgress, JobStage, LibraryInfo, LevelsEvent, ModelStatus, PauseReason, QueueStatus, Orphan, RecordingInfo, RecordStatus, Rule, SpeakerInfo, StreamChoice, StreamLevel, StreamStatus } from './api'
+import type { ApplyReport, AudioDeletion, DeleteMode, Deletion, AudioEntry, BleedRemoval, BlockedBy, AudioCut, BlockChange, BlockInfo, BlocksChange, CutsChange, BlockSuggestion, CallDetail, ClientInfo, DeviceInfo, GlossaryImportEntry, HistoryEntry, Hit, JobInfo, JobKind, JobOptions, JobProgress, JobStage, LibraryInfo, LevelsEvent, ModelStatus, PauseReason, QueueStatus, Orphan, RecordingInfo, RecordStatus, Rule, SpeakerInfo, StreamChoice, StreamLevel, StreamStatus } from './api'
 
 type Args = Record<string, any>
 
@@ -1134,6 +1134,59 @@ function txTick() {
     reason: (i === 2 ? 'energy_short' : 'text_and_energy') as BleedRemoval['reason'],
   })))
 }
+// ---- apagar empresa/cliente (mesmas regras de `removal.rs`: recusas antes de mexer, modo obrigatório com chamadas)
+function deletion(a: Args, clientId: number | null): Deletion | Promise<Deletion> {
+  const l = lib(a.libraryId)
+  if (l.kind === 'inbox') throw bad('invalid', clientId == null ? 'the inbox (unclassified calls) cannot be deleted' : 'unclassified calls have no clients')
+  const cl = clientId == null ? null : clients.find(c => c.id === clientId && c.library_id === l.id)
+  if (clientId != null && !cl) throw bad('not_found', `client ${clientId}`)
+  const mine = calls.filter(c => c.library_id === l.id && (clientId == null || c.client_id === clientId))
+  const busy = mine.find(openJob)
+  if (busy) throw bad('conflict', `call ${busy.key} has a transcription job queued or running`)
+  const target = rec.cur?.intent
+  if (target && target.library_id === l.id && (clientId == null || target.client_id === clientId)) throw bad('conflict', 'a recording to this destination is in progress or being finalized')
+  const mode: DeleteMode | null = a.mode ?? null
+  const glossary = rules.filter(r => r.scope === 'client' && r.library_id === l.id && (clientId == null || r.client_id === clientId)).length
+  const keepBlocked = clientId == null && mine.some(c => calls.some(x => x.library_id === 1 && x.key === c.key)) ? 'call already exists in the inbox' : null
+  const out: Deletion = {
+    dry_run: !!a.dryRun, library_id: l.id, client_id: clientId, name: cl?.name ?? l.name, mode, calls: mine.length,
+    audio_bytes: mine.reduce((n, c) => n + (c.audio.deleted_at ? 0 : audioBytesOf(c)), 0),
+    clients: clientId == null ? clients.filter(c => c.library_id === l.id).length : 0, glossary_entries: glossary,
+    keep_blocked: keepBlocked, moved: 0, deleted: 0, folder_removed: false, leftover: [],
+  }
+  if (a.dryRun) return out
+  if (mine.length && !mode) throw bad('invalid', `${mine.length} call(s) would be affected: choose keep or delete`)
+  if (mode === 'keep' && keepBlocked) throw bad('conflict', keepBlocked)
+  return new Promise(resolve => setTimeout(() => { // mover pastas pode demorar: dá tempo de ver o estado "ocupado"
+    for (const c of mine) {
+      if (mode === 'keep') { if (clientId == null) c.library_id = 1; c.client_id = null; out.moved++ }
+      else { calls.splice(calls.indexOf(c), 1); jobs.splice(0, jobs.length, ...jobs.filter(j => !(j.library_id === c.library_id && j.call_id === c.id))); out.deleted++ }
+    }
+    for (let i = rules.length - 1; i >= 0; i--) {
+      const r = rules[i]
+      if (r.scope === 'client' && r.library_id === l.id && (clientId == null || r.client_id === clientId)) rules.splice(i, 1)
+      else if (clientId == null && r.scope === 'global' && r.source_library_id === l.id) Object.assign(r, { source_edit_id: null, source_library_id: null })
+    }
+    if (clientId == null) {
+      clients.splice(0, clients.length, ...clients.filter(c => c.library_id !== l.id))
+      jobs.splice(0, jobs.length, ...jobs.filter(j => j.library_id !== l.id)) // como `DELETE FROM transcription_jobs WHERE library_id`
+      libs.splice(libs.indexOf(l), 1)
+      out.folder_removed = true
+    } else clients.splice(clients.indexOf(cl!), 1)
+    // `record_*`/`last_*` que apontavam para o que sumiu (os ids são reaproveitados)
+    for (const [lk, ck] of [['record_library_id', 'record_client_id'], ['last_library_id', 'last_client_id']]) {
+      if (Number(settings[lk]) !== l.id) continue
+      if (clientId == null) { delete settings[lk]; delete settings[ck] } else if (Number(settings[ck]) === clientId) delete settings[ck]
+    }
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)) } catch {}
+    resolve(out)
+  }, 700))
+}
+Object.assign(handlers, {
+  delete_library: (a: Args) => deletion(a, null),
+  delete_client: (a: Args) => deletion(a, a.clientId),
+})
+
 // ---- áudio das chamadas (#24; mesmas regras de `storage::delete_audio`)
 /** ~28 KB/s: as duas trilhas em FLAC, mais ~1% de cache de picos */
 const audioBytesOf = (c: Call) => Math.round(c.duration_s * 28_000)

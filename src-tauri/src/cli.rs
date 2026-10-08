@@ -11,6 +11,7 @@ use core_lib::rules::{ImportScope, RuleInput};
 use core_lib::transcription::params::JobOptions;
 use core_lib::transcription::queue::{self, JobKind, JobState, PauseReason};
 use core_lib::transcription::{keys, models, runtime};
+use core_lib::removal::{self, DeleteMode};
 use core_lib::{App, ClientFilter, Error, Library, Origin, glossary, paths, search, storage, transfer};
 use recorder::StreamChoice;
 use serde_json::{Value, json};
@@ -467,8 +468,21 @@ enum LibraryCmd {
     /// Cadastra (ou adota uma pasta já existente com library.db)
     Add { name: String, path: PathBuf },
     Rename { library: String, name: String },
-    /// Só descadastra; a pasta fica no disco
+    /// Só tira da lista (descadastra); a pasta, o library.db e as chamadas ficam no disco. Para apagar de verdade, `library delete`
     Remove { library: String },
+    /// Apaga a empresa/projeto de verdade (a inbox não). Com chamadas, escolha --keep-calls (vão para Não classificadas) ou --delete-calls (apaga as chamadas e o áudio, irreversível). Some o library.db e as pastas vazias; arquivos que não são do app ficam. Só o usuário pede isto: um agente nunca roda por conta própria
+    Delete {
+        library: String,
+        /// Move as chamadas para Não classificadas (os clientes e o glossário deles somem)
+        #[arg(long, conflicts_with = "delete_calls")]
+        keep_calls: bool,
+        /// Apaga as chamadas, o áudio e todas as linhas. Irreversível
+        #[arg(long)]
+        delete_calls: bool,
+        /// Só mostra o que seria apagado (chamadas, áudio, clientes, glossário), sem mudar nada
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -476,6 +490,23 @@ enum ClientCmd {
     List { #[arg(long)] library: String },
     Add { #[arg(long)] library: String, name: String },
     Rename { #[arg(long)] library: String, client: String, name: String },
+    /// Apaga o cliente e o glossário dele. Com chamadas, escolha --keep-calls (ficam na empresa, sem cliente) ou --delete-calls (apaga as chamadas e o áudio, irreversível). Só o usuário pede isto: um agente nunca roda por conta própria
+    Delete {
+        /// Empresa/projeto do cliente (id ou nome)
+        #[arg(long)]
+        library: String,
+        /// Cliente (id, nome ou slug)
+        client: String,
+        /// Deixa as chamadas na empresa, sem cliente
+        #[arg(long, conflicts_with = "delete_calls")]
+        keep_calls: bool,
+        /// Apaga as chamadas, o áudio e todas as linhas. Irreversível
+        #[arg(long)]
+        delete_calls: bool,
+        /// Só mostra o que seria apagado (chamadas, áudio, glossário), sem mudar nada
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1153,6 +1184,17 @@ fn exec(app: &App, cmd: Cmd, lang: Lang, json_out: bool) -> core_lib::Result<Out
                 app.remove_library(row.id)?;
                 Ok(Output::Json(json!({"removed": row.id, "path": row.root}), Some(json!({"event": "changed"}))))
             }
+            LibraryCmd::Delete { library, keep_calls, delete_calls, dry_run } => {
+                let row = app.find_library(&library)?;
+                let mode = delete_mode(keep_calls, delete_calls);
+                let done = |r: removal::Deletion| deletion_output(lang, r);
+                if !dry_run && mode.is_none() {
+                    // sem escolha: só segue se não há chamadas (a simulação também faz as recusas de sempre)
+                    let n = removal::delete_library(app, row.id, None, true)?.calls;
+                    need_mode(n, "library")?;
+                }
+                done(removal::delete_library(app, row.id, mode, dry_run)?)
+            }
         },
         Cmd::Client { what } => match what {
             ClientCmd::List { library } => json(to_json(app.open_library(app.find_library(&library)?.id)?.clients()?)?),
@@ -1166,6 +1208,20 @@ fn exec(app: &App, cmd: Cmd, lang: Lang, json_out: bool) -> core_lib::Result<Out
                 let c = lib.find_client(&client)?;
                 lib.rename_client(c.id, &name)?;
                 Ok(Output::Json(json!({"id": c.id, "name": name}), changed(lib.id(), None)))
+            }
+            ClientCmd::Delete { library, client, keep_calls, delete_calls, dry_run } => {
+                let row = app.find_library(&library)?;
+                // `Library::open` criaria a pasta e um library.db vazio se a pasta sumiu
+                if row.is_inbox() || !row.root.join(core_lib::library::DB_FILE).is_file() {
+                    return Err(Error::invalid(format!("library {library} has no clients or is unavailable")));
+                }
+                let client = Library::open(row.clone())?.find_client(&client)?;
+                let mode = delete_mode(keep_calls, delete_calls);
+                if !dry_run && mode.is_none() {
+                    let n = removal::delete_client(app, row.id, client.id, None, true)?.calls;
+                    need_mode(n, "client")?;
+                }
+                deletion_output(lang, removal::delete_client(app, row.id, client.id, mode, dry_run)?)
             }
         },
         Cmd::Glossary { what } => exec_glossary(app, what, lang),
@@ -1210,6 +1266,34 @@ fn exec(app: &App, cmd: Cmd, lang: Lang, json_out: bool) -> core_lib::Result<Out
                 json(json!({"data_dir": paths::resolve_data_dir(None), "config_file": paths::config_file()}))
             }
         },
+    }
+}
+
+/// `--keep-calls` / `--delete-calls` (a CLI os declara conflitantes) → modo do núcleo.
+fn delete_mode(keep_calls: bool, delete_calls: bool) -> Option<DeleteMode> {
+    match (keep_calls, delete_calls) {
+        (true, _) => Some(DeleteMode::Keep),
+        (_, true) => Some(DeleteMode::Delete),
+        _ => None,
+    }
+}
+
+/// Sem `--keep-calls`/`--delete-calls` não há padrão: com chamadas, explica as duas saídas.
+fn need_mode(calls: i64, what: &str) -> core_lib::Result<()> {
+    if calls == 0 {
+        return Ok(());
+    }
+    let (keep, place) = if what == "library" { ("moves them to Unclassified", "the company/project") } else { ("leaves them in the company without a client", "the client") };
+    Err(Error::invalid(format!(
+        "{calls} call(s) belong to {place}: pass --keep-calls ({keep}) or --delete-calls (deletes the calls and their audio, irreversible); there is no default; --dry-run shows the numbers"
+    )))
+}
+
+fn deletion_output(lang: Lang, r: removal::Deletion) -> core_lib::Result<Output> {
+    if r.dry_run {
+        Ok(Output::Json(json!({"dry_run": true, "message": i18n::msg(lang, "dry_run"), "result": to_json(r)?}), None))
+    } else {
+        Ok(Output::Json(to_json(r)?, Some(json!({"event": "changed"}))))
     }
 }
 
@@ -2046,5 +2130,97 @@ mod tests {
         assert!(notify.is_some());
         let (v, _) = run(&app, &["glossary", "remove", "1", "--library", "Empresa"]).unwrap();
         assert_eq!(v["removed"]["scope"], "client");
+    }
+    #[test]
+    fn delete_commands_parse() {
+        let p = |args: &[&str]| Cli::try_parse_from(std::iter::once("tary").chain(args.iter().copied())).map(|c| c.cmd);
+        let Ok(Cmd::Library { what: Some(LibraryCmd::Delete { library, keep_calls, delete_calls, dry_run }) }) = p(&["library", "delete", "Empresa", "--keep-calls", "--dry-run"]) else {
+            panic!("library delete")
+        };
+        assert_eq!((library.as_str(), keep_calls, delete_calls, dry_run), ("Empresa", true, false, true));
+        let Ok(Cmd::Client { what: ClientCmd::Delete { library, client, keep_calls, delete_calls, dry_run } }) = p(&["client", "delete", "--library", "Empresa", "Cliente", "--delete-calls"]) else {
+            panic!("client delete")
+        };
+        assert_eq!((library.as_str(), client.as_str(), keep_calls, delete_calls, dry_run), ("Empresa", "Cliente", false, true, false));
+        // sem flag também parseia (o erro de "escolha uma" vem da execução, só se houver chamadas)
+        assert!(p(&["library", "delete", "Empresa"]).is_ok() && p(&["client", "delete", "--library", "Empresa", "Cliente"]).is_ok());
+        // as duas são conflitantes; `client delete` pede biblioteca e cliente; `library remove` segue igual
+        assert!(p(&["library", "delete", "Empresa", "--keep-calls", "--delete-calls"]).is_err());
+        assert!(p(&["client", "delete", "--library", "Empresa", "Cliente", "--keep-calls", "--delete-calls"]).is_err());
+        assert!(p(&["client", "delete", "--library", "Empresa"]).is_err());
+        assert!(p(&["client", "delete", "Empresa", "Cliente"]).is_err(), "--library é obrigatório, como em client add/rename");
+        assert!(matches!(p(&["library", "remove", "Empresa"]), Ok(Cmd::Library { what: Some(LibraryCmd::Remove { .. }) })));
+    }
+
+    /// Empresa com um cliente e a chamada importada classificada nele.
+    fn company_with_call(app: &App, tmp: &std::path::Path) -> PathBuf {
+        let company = tmp.join("Empresa");
+        run(app, &["library", "add", "Empresa", company.to_str().unwrap()]).unwrap();
+        run(app, &["client", "add", "--library", "Empresa", "Cliente"]).unwrap();
+        run(app, &["glossary", "add", "gate wei", "Gateway", "--library", "Empresa", "--client", "Cliente"]).unwrap();
+        run(app, &["assign", "call_2026-06-01_10-00-00", "--library", "Empresa", "--client", "Cliente"]).unwrap();
+        company
+    }
+
+    #[test]
+    fn client_delete_asks_for_a_choice_and_never_defaults() {
+        let (tmp, app) = setup();
+        let company = company_with_call(&app, tmp.path());
+        // sem flag e com chamadas: erro que explica as duas saídas; nada muda
+        let err = run(&app, &["client", "delete", "--library", "Empresa", "Cliente"]).unwrap_err();
+        assert_eq!(err.code(), "invalid");
+        let msg = err.to_string();
+        assert!(msg.contains("--keep-calls") && msg.contains("--delete-calls") && msg.contains("no default"), "{msg}");
+        assert_eq!(run(&app, &["client", "list", "--library", "Empresa"]).unwrap().0[0]["call_count"], 1);
+
+        // simulação: contagens, sem aviso para a app
+        let (v, notify) = run(&app, &["client", "delete", "--library", "Empresa", "cliente", "--dry-run"]).unwrap();
+        assert!(notify.is_none());
+        assert_eq!((v["dry_run"].as_bool(), v["result"]["calls"].as_i64(), v["result"]["glossary_entries"].as_i64(), v["result"]["name"].as_str()), (Some(true), Some(1), Some(1), Some("Cliente")));
+        assert!(v["message"].is_string());
+
+        // manter: a chamada fica na empresa, sem cliente
+        let (v, notify) = run(&app, &["client", "delete", "--library", "Empresa", "Cliente", "--keep-calls"]).unwrap();
+        assert_eq!((v["moved"].as_i64(), v["deleted"].as_i64()), (Some(1), Some(0)));
+        assert_eq!(notify.unwrap()["event"], "changed");
+        assert_eq!(run(&app, &["client", "list", "--library", "Empresa"]).unwrap().0, json!([]));
+        let (l, _) = run(&app, &["list", "--library", "Empresa", "--unassigned"]).unwrap();
+        assert_eq!(l.as_array().unwrap().len(), 1);
+        assert!(company.join("library.db").is_file());
+        // cliente que não existe mais
+        assert!(run(&app, &["client", "delete", "--library", "Empresa", "Cliente", "--keep-calls"]).is_err_and(|e| e.code() == "not_found"));
+    }
+
+    #[test]
+    fn library_delete_keep_and_delete() {
+        let (tmp, app) = setup();
+        let company = company_with_call(&app, tmp.path());
+        let err = run(&app, &["library", "delete", "Empresa"]).unwrap_err();
+        assert_eq!(err.code(), "invalid");
+        assert!(err.to_string().contains("--keep-calls") && err.to_string().contains("--delete-calls"));
+        let (v, notify) = run(&app, &["library", "delete", "Empresa", "--delete-calls", "--dry-run"]).unwrap();
+        assert!(notify.is_none());
+        assert_eq!((v["result"]["calls"].as_i64(), v["result"]["clients"].as_i64()), (Some(1), Some(1)));
+        assert!(company.join("library.db").is_file());
+
+        // manter: a chamada volta para Não classificadas e a pasta some
+        let (v, notify) = run(&app, &["library", "delete", "Empresa", "--keep-calls"]).unwrap();
+        assert_eq!((v["moved"].as_i64(), v["folder_removed"].as_bool()), (Some(1), Some(true)));
+        assert!(notify.is_some() && !company.exists());
+        let (libs, _) = run(&app, &["library"]).unwrap();
+        assert_eq!(libs.as_array().unwrap().len(), 1);
+        assert_eq!(run(&app, &["show", "call_2026-06-01_10-00-00"]).unwrap().0["library_name"], "");
+
+        // apagar: sem empresa nem chamada; a inbox nunca
+        let company = tmp.path().join("Outra");
+        run(&app, &["library", "add", "Outra", company.to_str().unwrap()]).unwrap();
+        run(&app, &["assign", "call_2026-06-01_10-00-00", "--library", "Outra"]).unwrap();
+        let (v, _) = run(&app, &["library", "delete", "Outra", "--delete-calls"]).unwrap();
+        assert_eq!((v["deleted"].as_i64(), v["moved"].as_i64()), (Some(1), Some(0)));
+        assert!(run(&app, &["show", "call_2026-06-01_10-00-00"]).is_err_and(|e| e.code() == "not_found"));
+        assert!(run(&app, &["library", "delete", "0", "--keep-calls"]).is_err());
+        // empresa sem chamadas: dispensa a escolha
+        run(&app, &["library", "add", "Vazia", tmp.path().join("Vazia").to_str().unwrap()]).unwrap();
+        assert!(run(&app, &["library", "delete", "Vazia"]).is_ok());
     }
 }

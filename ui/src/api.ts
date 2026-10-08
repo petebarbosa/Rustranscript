@@ -140,6 +140,16 @@ export interface AudioEntry {
   library_id: number; call_id: number; call_key: string; title: string; client_name: string | null
   started_at: string; duration_s: number; bytes: number; blocked: 'not_transcribed' | 'job_open' | null
 }
+/** Apagar empresa/cliente (`delete_library`/`delete_client`): o que fazer com as chamadas. Com chamadas o modo é obrigatório. */
+export type DeleteMode = 'keep' | 'delete'
+/** Resultado de `delete_library`/`delete_client`; em `dry_run` só as contagens (nada muda). `keep_blocked`: por que `keep` não dá agora. */
+export interface Deletion {
+  dry_run: boolean; library_id: number; client_id: number | null; name: string; mode: DeleteMode | null
+  calls: number; audio_bytes: number; clients: number; glossary_entries: number; keep_blocked: string | null
+  moved: number; deleted: number; folder_removed: boolean
+  /** o que ficou no disco e não é do app (pasta adotada com arquivos de fora) */
+  leftover: string[]
+}
 export interface AudioList { total_bytes: number; calls: AudioEntry[] }
 export interface Bootstrap {
   data_dir: string; system_language: string; inbox_id: number
@@ -313,7 +323,12 @@ export const api = {
   libraries: () => call<LibraryInfo[]>('libraries'),
   addLibrary: (name: string, path: string) => call<number>('add_library', { name, path }),
   renameLibrary: (libraryId: number, name: string) => call<void>('rename_library', { libraryId, name }),
+  /** Só tira da lista (a pasta e as chamadas ficam no disco). Apagar de verdade: `deleteLibrary`. */
   removeLibrary: (libraryId: number) => call<void>('remove_library', { libraryId }),
+  deleteLibrary: (libraryId: number, mode: DeleteMode | null, dryRun: boolean) =>
+    call<Deletion>('delete_library', { libraryId, mode, dryRun }),
+  deleteClient: (libraryId: number, clientId: number, mode: DeleteMode | null, dryRun: boolean) =>
+    call<Deletion>('delete_client', { libraryId, clientId, mode, dryRun }),
   clients: (libraryId: number) => call<ClientInfo[]>('clients', { libraryId }),
   addClient: (libraryId: number, name: string) => call<ClientInfo>('add_client', { libraryId, name }),
   renameClient: (libraryId: number, clientId: number, name: string) =>

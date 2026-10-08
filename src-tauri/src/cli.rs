@@ -493,6 +493,7 @@ enum ClientCmd {
     /// Apaga o cliente e o glossário dele. Com chamadas, escolha --keep-calls (ficam na empresa, sem cliente) ou --delete-calls (apaga as chamadas e o áudio, irreversível). Só o usuário pede isto: um agente nunca roda por conta própria
     Delete {
         /// Empresa/projeto do cliente (id ou nome)
+        #[arg(long)]
         library: String,
         /// Cliente (id, nome ou slug)
         client: String,
@@ -2137,16 +2138,17 @@ mod tests {
             panic!("library delete")
         };
         assert_eq!((library.as_str(), keep_calls, delete_calls, dry_run), ("Empresa", true, false, true));
-        let Ok(Cmd::Client { what: ClientCmd::Delete { library, client, keep_calls, delete_calls, dry_run } }) = p(&["client", "delete", "Empresa", "Cliente", "--delete-calls"]) else {
+        let Ok(Cmd::Client { what: ClientCmd::Delete { library, client, keep_calls, delete_calls, dry_run } }) = p(&["client", "delete", "--library", "Empresa", "Cliente", "--delete-calls"]) else {
             panic!("client delete")
         };
         assert_eq!((library.as_str(), client.as_str(), keep_calls, delete_calls, dry_run), ("Empresa", "Cliente", false, true, false));
         // sem flag também parseia (o erro de "escolha uma" vem da execução, só se houver chamadas)
-        assert!(p(&["library", "delete", "Empresa"]).is_ok() && p(&["client", "delete", "Empresa", "Cliente"]).is_ok());
+        assert!(p(&["library", "delete", "Empresa"]).is_ok() && p(&["client", "delete", "--library", "Empresa", "Cliente"]).is_ok());
         // as duas são conflitantes; `client delete` pede biblioteca e cliente; `library remove` segue igual
         assert!(p(&["library", "delete", "Empresa", "--keep-calls", "--delete-calls"]).is_err());
-        assert!(p(&["client", "delete", "Empresa", "Cliente", "--keep-calls", "--delete-calls"]).is_err());
-        assert!(p(&["client", "delete", "Empresa"]).is_err());
+        assert!(p(&["client", "delete", "--library", "Empresa", "Cliente", "--keep-calls", "--delete-calls"]).is_err());
+        assert!(p(&["client", "delete", "--library", "Empresa"]).is_err());
+        assert!(p(&["client", "delete", "Empresa", "Cliente"]).is_err(), "--library é obrigatório, como em client add/rename");
         assert!(matches!(p(&["library", "remove", "Empresa"]), Ok(Cmd::Library { what: Some(LibraryCmd::Remove { .. }) })));
     }
 
@@ -2165,20 +2167,20 @@ mod tests {
         let (tmp, app) = setup();
         let company = company_with_call(&app, tmp.path());
         // sem flag e com chamadas: erro que explica as duas saídas; nada muda
-        let err = run(&app, &["client", "delete", "Empresa", "Cliente"]).unwrap_err();
+        let err = run(&app, &["client", "delete", "--library", "Empresa", "Cliente"]).unwrap_err();
         assert_eq!(err.code(), "invalid");
         let msg = err.to_string();
         assert!(msg.contains("--keep-calls") && msg.contains("--delete-calls") && msg.contains("no default"), "{msg}");
         assert_eq!(run(&app, &["client", "list", "--library", "Empresa"]).unwrap().0[0]["call_count"], 1);
 
         // simulação: contagens, sem aviso para a app
-        let (v, notify) = run(&app, &["client", "delete", "Empresa", "cliente", "--dry-run"]).unwrap();
+        let (v, notify) = run(&app, &["client", "delete", "--library", "Empresa", "cliente", "--dry-run"]).unwrap();
         assert!(notify.is_none());
         assert_eq!((v["dry_run"].as_bool(), v["result"]["calls"].as_i64(), v["result"]["glossary_entries"].as_i64(), v["result"]["name"].as_str()), (Some(true), Some(1), Some(1), Some("Cliente")));
         assert!(v["message"].is_string());
 
         // manter: a chamada fica na empresa, sem cliente
-        let (v, notify) = run(&app, &["client", "delete", "Empresa", "Cliente", "--keep-calls"]).unwrap();
+        let (v, notify) = run(&app, &["client", "delete", "--library", "Empresa", "Cliente", "--keep-calls"]).unwrap();
         assert_eq!((v["moved"].as_i64(), v["deleted"].as_i64()), (Some(1), Some(0)));
         assert_eq!(notify.unwrap()["event"], "changed");
         assert_eq!(run(&app, &["client", "list", "--library", "Empresa"]).unwrap().0, json!([]));
@@ -2186,7 +2188,7 @@ mod tests {
         assert_eq!(l.as_array().unwrap().len(), 1);
         assert!(company.join("library.db").is_file());
         // cliente que não existe mais
-        assert!(run(&app, &["client", "delete", "Empresa", "Cliente", "--keep-calls"]).is_err_and(|e| e.code() == "not_found"));
+        assert!(run(&app, &["client", "delete", "--library", "Empresa", "Cliente", "--keep-calls"]).is_err_and(|e| e.code() == "not_found"));
     }
 
     #[test]

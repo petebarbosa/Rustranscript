@@ -94,7 +94,7 @@ export function createPlayer(o: Opts): PlayerCtl {
   const speedBtn = (s: number) => `<button type="button" data-speed="${s}" aria-pressed="${s === 1}" class="rounded-lg px-2 py-1 font-mono text-xs text-zinc-400 hover:bg-white/5 hover:text-zinc-100 aria-pressed:bg-violet-500/20 aria-pressed:text-violet-200">${s}×</button>`
   const el = document.createElement('div')
   el.id = 'player'
-  el.className = 'pointer-events-auto mx-auto flex max-w-6xl flex-wrap items-center gap-x-3 gap-y-2 rounded-2xl border border-white/10 bg-ink-900/95 px-4 py-2.5 shadow-2xl backdrop-blur-md'
+  el.className = 'pointer-events-auto mx-auto flex max-w-6xl flex-wrap items-center gap-x-3 gap-y-2 rounded-2xl border border-white/10 bg-ink-900 px-4 py-2.5 shadow-2xl'
   el.innerHTML = `
     <button type="button" data-p="toggle" title="${esc(t('player.play'))}" aria-label="${esc(t('player.play'))}" class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-violet-500 text-white hover:bg-violet-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300">${ICON_PLAY}</button>
     <span data-p="time" class="shrink-0 whitespace-nowrap font-mono text-xs tabular-nums text-zinc-300"></span>
@@ -134,6 +134,8 @@ export function createPlayer(o: Opts): PlayerCtl {
   // ------------------------------------------------------------ onda
   /** Cor da barra de acordo com o que já tocou. Os tokens do tema ficam em CSS; aqui os mesmos valores. */
   const PLAYED = '#a99cf9', REST = '#3f4457', HEAD = '#ffffff'
+  /** Ladrilhos dos cortes, refeitos só quando a densidade de pixels muda (o `draw()` roda ~10×/s tocando). */
+  let tiles: { dpr: number; saved: CanvasPattern | null; fresh: CanvasPattern | null } | null = null
 
   function draw() {
     if (!ctx) return
@@ -166,7 +168,8 @@ export function createPlayer(o: Opts): PlayerCtl {
         ctx.fillStyle = edge
         ctx.fillRect(x0, 0, dpr, h); ctx.fillRect(x1 - dpr, 0, dpr, h)
       }
-      const saved = hatch(ctx, dpr, 'rgba(11,13,18,0.82)', '#6b7186'), fresh = hatch(ctx, dpr, 'rgba(139,92,246,0.25)', '#a99cf9')
+      if (tiles?.dpr !== dpr) tiles = { dpr, saved: hatch(ctx, dpr, 'rgba(11,13,18,0.82)', '#6b7186'), fresh: hatch(ctx, dpr, 'rgba(139,92,246,0.25)', '#a99cf9') }
+      const { saved, fresh } = tiles
       for (const c of cuts) cover(c.t_start, c.t_end, saved, '#6b7186')
       for (const [a, b] of pend) cover(a, b, fresh, '#a99cf9')
       // pontas arrastáveis dos cortes novos

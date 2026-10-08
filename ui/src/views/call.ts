@@ -225,7 +225,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
     </div>
     <div id="dock" class="@container pointer-events-none sticky bottom-0 z-30 px-6 pb-4">
     ${pending ? '' : cutPanelHtml()}
-    ${pending ? '' : `<div id="select-bar" hidden class="pointer-events-auto mx-auto mb-3 flex w-fit max-w-[calc(100%-2rem)] flex-wrap items-center justify-center gap-x-3 gap-y-2 rounded-2xl border border-violet-400/30 bg-ink-900/95 px-4 py-2.5 shadow-2xl backdrop-blur-md">
+    ${pending ? '' : `<div id="select-bar" hidden class="pointer-events-auto mx-auto mb-3 flex w-fit max-w-[calc(100%-2rem)] flex-wrap items-center justify-center gap-x-3 gap-y-2 rounded-2xl border border-violet-400/30 bg-ink-900 px-4 py-2.5 shadow-2xl">
       <span id="select-count" aria-live="polite" class="min-w-[6.5rem] text-sm font-medium text-white"></span>
       <button type="button" data-sel="all" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/5 hover:text-zinc-100">${esc(t('select.all'))}</button>
       <button type="button" data-sel="none" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/5 hover:text-zinc-100">${esc(t('select.none'))}</button>
@@ -970,7 +970,7 @@ export async function renderCall(el: HTMLElement, libraryId: number, callId: num
         // o corte de um trecho excluído sai restaurando o trecho; só o manual tem "remover" aqui
         c.block_id != null && c.block_seq != null ? '' : rm(`data-cut="remove" data-id="${c.id}"`, t('cut.remove')))),
     ]
-    return `<div id="cut-panel" ${cutMode ? '' : 'hidden'} class="pointer-events-auto mx-auto mb-3 max-w-6xl rounded-2xl border border-violet-400/30 bg-ink-900/95 p-4 shadow-2xl backdrop-blur-md">
+    return `<div id="cut-panel" ${cutMode ? '' : 'hidden'} class="pointer-events-auto mx-auto mb-3 max-w-6xl rounded-2xl border border-violet-400/30 bg-ink-900 p-4 shadow-2xl">
       <div class="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
         <div class="min-w-[16rem] flex-1">
           <h2 class="text-sm font-semibold text-white">${esc(t('cut.title'))}</h2>
